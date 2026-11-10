@@ -8,7 +8,7 @@
 
 ```
 dist\
-├── EasyTier 控制台.exe        ← 只需要双击这一个
+├── EasyTier-Console.exe        ← 只需要双击这一个
 ├── config\
 │   └── config.toml           ← EasyTier 配置文件
 ├── logs\
@@ -27,7 +27,7 @@ dist\
 
 ## 二、快速开始
 
-1. 双击 `EasyTier 控制台.exe`
+1. 双击 `EasyTier-Console.exe`
 2. **Windows 会弹出 UAC 提示**（「是否允许此应用对你的设备进行更改」），点 **「是」**
 3. 点右上角 **「启动」** 按钮
 4. 稍等几秒，状态徽章变绿显示「运行中」，各卡片出现数据
@@ -56,7 +56,7 @@ ERROR CORE: error=some instances stopped with errors
 **方式 A（推荐）**：直接双击，程序检测到权限不足时会自动弹 UAC 请求提权，
 点「是」即可。提权后会自动重新打开界面。
 
-**方式 B**：右键 `EasyTier 控制台.exe` → **「以管理员身份运行」**
+**方式 B**：右键 `EasyTier-Console.exe` → **「以管理员身份运行」**
 
 **如果 UAC 提示被拒绝**：程序会以普通权限打开，界面顶部会显示红色的
 「未以管理员身份运行」警告条，此时点「启动」会弹出明确的错误说明而不是莫名失败。
@@ -239,23 +239,23 @@ EasyTier 通常需要长期后台运行。最小化到托盘后：
 cd dist
 
 # 完整自检
-.\EasyTier 控制台.exe --selftest
+.\EasyTier-Console.exe --selftest
 
 # 只查状态
-.\EasyTier 控制台.exe --selftest status
+.\EasyTier-Console.exe --selftest status
 
 # 只读日志
-.\EasyTier 控制台.exe --selftest log
+.\EasyTier-Console.exe --selftest log
 
 # 只测配置读取与校验
-.\EasyTier 控制台.exe --selftest config
+.\EasyTier-Console.exe --selftest config
 
 # 动作类
-.\EasyTier 控制台.exe --selftest start
-.\EasyTier 控制台.exe --selftest stop
-.\EasyTier 控制台.exe --selftest restart
-.\EasyTier 控制台.exe --selftest autostart-on
-.\EasyTier 控制台.exe --selftest autostart-off
+.\EasyTier-Console.exe --selftest start
+.\EasyTier-Console.exe --selftest stop
+.\EasyTier-Console.exe --selftest restart
+.\EasyTier-Console.exe --selftest autostart-on
+.\EasyTier-Console.exe --selftest autostart-off
 ```
 
 输出末尾会显示 `失败项: N`，0 表示全部正常。

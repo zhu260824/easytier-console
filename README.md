@@ -40,7 +40,7 @@ EasyTier 的第三方桌面控制台。用一个 exe 管理 EasyTier 的虚拟�
 
 ```
 dist/
-├── EasyTier 控制台.exe        ← 本项目的程序
+├── EasyTier-Console.exe        ← 本项目的程序
 ├── config/
 │   └── config.toml            ← 配置（首次使用需改成自己的网络参数）
 ├── logs/                      ← 日志目录（自动创建）
@@ -92,7 +92,7 @@ network_secret = "a-strong-random-secret"
 
 ### 3. 运行
 
-双击 `EasyTier 控制台.exe` → UAC 提示点「是」→ 点「启动」。
+双击 `EasyTier-Console.exe` → UAC 提示点「是」→ 点「启动」。
 
 > ⚠️ **必须用管理员权限运行。**
 > EasyTier 通过 wintun 驱动创建虚拟网卡，需要加载内核驱动和修改网络配置，
@@ -117,7 +117,7 @@ cargo build --release
 ```
 
 产物在 `src-tauri/target/release/easytier-console.exe`，
-重命名为 `EasyTier 控制台.exe` 后按上面的目录结构放置即可。
+重命名为 `EasyTier-Console.exe` 后按上面的目录结构放置即可。
 
 ### 打包
 
@@ -256,15 +256,15 @@ if !is_elevated() && elevate_self() {
 不开界面也能验证各功能，排查问题很有用：
 
 ```powershell
-.\EasyTier 控制台.exe --selftest            # 完整自检
-.\EasyTier 控制台.exe --selftest status     # 只查状态
-.\EasyTier 控制台.exe --selftest log        # 只读日志
-.\EasyTier 控制台.exe --selftest config     # 只测配置读取与校验
-.\EasyTier 控制台.exe --selftest start      # 启动核心
-.\EasyTier 控制台.exe --selftest stop       # 停止核心
-.\EasyTier 控制台.exe --selftest restart    # 重启核心
-.\EasyTier 控制台.exe --selftest autostart-on
-.\EasyTier 控制台.exe --selftest autostart-off
+.\EasyTier-Console.exe --selftest            # 完整自检
+.\EasyTier-Console.exe --selftest status     # 只查状态
+.\EasyTier-Console.exe --selftest log        # 只读日志
+.\EasyTier-Console.exe --selftest config     # 只测配置读取与校验
+.\EasyTier-Console.exe --selftest start      # 启动核心
+.\EasyTier-Console.exe --selftest stop       # 停止核心
+.\EasyTier-Console.exe --selftest restart    # 重启核心
+.\EasyTier-Console.exe --selftest autostart-on
+.\EasyTier-Console.exe --selftest autostart-off
 ```
 
 输出末尾显示 `失败项: N`，0 表示全部正常。

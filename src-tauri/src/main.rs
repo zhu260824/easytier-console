@@ -587,7 +587,7 @@ fn start_core() -> Result<String, String> {
             "需要管理员权限才能启动核心。\n\n\
              原因：EasyTier 通过 wintun 驱动创建虚拟网卡，\
              这需要加载内核驱动并修改网络配置，普通权限会失败。\n\n\
-             解决：关闭本窗口，右键 EasyTier 控制台.exe → \
+             解决：关闭本窗口，右键 EasyTier-Console.exe → \
              「以管理员身份运行」。"
                 .into(),
         );
@@ -1058,7 +1058,8 @@ fn get_meta() -> Value {
 //
 // Linux 方案：~/.config/autostart/*.desktop（freedesktop 标准）
 
-const AUTOSTART_NAME: &str = "EasyTier 控制台";
+// 启动文件夹里的快捷方式名（纯 ASCII，避免中文路径在部分环境下出问题）
+const AUTOSTART_NAME: &str = "EasyTier Console";
 
 /// 用户启动文件夹路径（Windows）
 #[cfg(target_os = "windows")]

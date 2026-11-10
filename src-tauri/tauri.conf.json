@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "EasyTier 控制台",
+  "productName": "EasyTier-Console",
   "version": "1.0.0",
   "identifier": "com.easytier.console",
   "build": {
