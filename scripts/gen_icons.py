@@ -1,26 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-把 official-icon.png 转成 Tauri 需要的全套图标（纯标准库实现）
+生成 Tauri 需要的全套应用图标（纯标准库实现，无需 Pillow）
 
-产出：
-  icons/32x32.png
-  icons/128x128.png
-  icons/128x128@2x.png  (256)
-  icons/icon.png        (512)
-  icons/icon.ico        (多尺寸，Windows 必需)
+用法：
+    python scripts/gen_icons.py <源图.png>
 
-PNG 方面只做「按需缩放」——原图已是 512x512，直接复用/最近邻缩放。
-ICO 直接内嵌 PNG 数据（Vista+ 支持）。
+    例如：
+    python scripts/gen_icons.py logo.png
+
+源图要求：
+    - PNG 格式，8bit RGB 或 RGBA
+    - 正方形，建议 512x512 或更大
+
+产出（写入 src-tauri/icons/）：
+    32x32.png
+    128x128.png
+    128x128@2x.png  (256)
+    icon.png        (512)
+    icon.ico        (多尺寸 16~256，Windows 必需)
+
+说明：
+    本项目的图标基于 EasyTier 官方 logo，版权归 EasyTier 项目所有。
+    如需替换成自己的图标，准备一张 512x512 的 PNG 后运行本脚本即可。
 """
 import os
 import struct
+import sys
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# HERE = <项目>/win-build/src-tauri  ->  项目根 = 上两级
-SRC = os.path.join(os.path.dirname(os.path.dirname(HERE)), "official-icon.png")
-ICON_DIR = os.path.join(HERE, "icons")
+# HERE = <项目>/scripts  ->  图标输出到 <项目>/src-tauri/icons
+ICON_DIR = os.path.join(os.path.dirname(HERE), "src-tauri", "icons")
 
 
 # ---------------------------------------------------------------- PNG 读写
@@ -169,9 +180,27 @@ def build_ico(png_by_size, out_path):
 # ---------------------------------------------------------------- 主流程
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("用法: python scripts/gen_icons.py <源图.png>")
+        print()
+        print("示例: python scripts/gen_icons.py logo.png")
+        print("提示: 源图需为 8bit PNG，正方形，建议 512x512 或更大")
+        sys.exit(2)
+
+    SRC = sys.argv[1]
+    if not os.path.isfile(SRC):
+        print(f"错误: 找不到源文件 {SRC}")
+        sys.exit(1)
+
     print(f"源文件: {SRC}")
     sw, sh, src = png_read(SRC)
     print(f"源尺寸: {sw}x{sh}")
+
+    if sw != sh:
+        print(f"警告: 源图不是正方形（{sw}x{sh}），缩放后可能变形")
+
+    os.makedirs(ICON_DIR, exist_ok=True)
+    print(f"输出目录: {ICON_DIR}")
     print()
 
     targets = {
