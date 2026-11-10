@@ -1,0 +1,44 @@
+# 构建产物
+/target/
+/src-tauri/target/
+**/*.rs.bk
+*.pdb
+
+# Tauri 自动生成的 schema（每次构建会重建）
+/src-tauri/gen/
+
+# 发布包产物（如需要请自行打包，不纳入版本控制）
+/dist/
+/package/
+
+# 依赖目录
+node_modules/
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志与临时文件
+*.log
+*.tmp
+*.bak
+*.cache
+
+# Python（图标生成脚本用的缓存）
+__pycache__/
+*.pyc
+
+# 本地个人配置
+# 注意：dist/config/config.toml 是随包分发的示例模板，
+# 真实使用时会填入个人网络参数，请勿提交改动后的版本。
+/src-tauri/config.local.toml
+.env
+.env.*

@@ -1,0 +1,4 @@
+// 1 RT_MANIFEST "app.manifest"
+// 上面的意思是：把 app.manifest 作为 RT_MANIFEST(24) 资源、ID 1 嵌入。
+// windres / rc.exe 都认这种语法。
+1 24 "app.manifest"

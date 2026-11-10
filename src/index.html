@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EasyTier 控制台</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ============ 顶部栏 ============ -->
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+      <circle cx="12" cy="12" r="2.5"/>
+      <circle cx="4" cy="6" r="2"/>
+      <circle cx="20" cy="6" r="2"/>
+      <circle cx="4" cy="18" r="2"/>
+      <circle cx="20" cy="18" r="2"/>
+      <path d="M6 7l4.2 3.6M18 7l-4.2 3.6M6 17l4.2-3.6M18 17l-4.2-3.6"/>
+    </svg>
+    <div>
+      <h1>EasyTier</h1>
+      <p class="sub">网络控制台</p>
+    </div>
+  </div>
+
+  <div class="status-area">
+    <div id="connBadge" class="badge badge-gray">
+      <span class="dot"></span><span id="connText">检测中</span>
+    </div>
+    <div class="actions">
+      <button id="btnStart"  class="btn btn-primary" title="启动 EasyTier 核心">
+        <span class="btn-ico"></span><span class="btn-txt">启动</span>
+      </button>
+      <button id="btnStop"   class="btn btn-danger"  title="停止 EasyTier 核心">
+        <span class="btn-ico"></span><span class="btn-txt">停止</span>
+      </button>
+      <button id="btnRestart" class="btn" title="重启核心">
+        <span class="btn-ico"></span><span class="btn-txt">重启</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- 全局操作遮罩：长操作时显示 -->
+<div id="busyOverlay" class="busy-overlay">
+  <div class="busy-box">
+    <div class="busy-spinner"></div>
+    <div class="busy-title" id="busyTitle">正在启动核心…</div>
+    <div class="busy-desc" id="busyDesc">正在创建虚拟网卡并连接对等节点</div>
+  </div>
+</div>
+
+
+<!-- 权限警告条：非管理员时显示 -->
+<div id="permWarning" class="perm-warning" style="display:none">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    <path d="M12 9v4M12 17h.01"/>
+    <path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/>
+  </svg>
+  <div class="perm-text">
+    <strong>未以管理员身份运行</strong>
+    <span>EasyTier 创建虚拟网卡需要管理员权限，当前点「启动」会失败。请关闭本窗口，右键 <code>EasyTier 控制台.exe</code> → 以管理员身份运行。</span>
+  </div>
+</div>
+
+<main class="container">
+
+  <!-- ============ 本节点 ============ -->
+  <section class="card">
+    <div class="card-head">
+      <h2>本节点</h2>
+      <span id="nodeVersion" class="tag"></span>
+    </div>
+    <div id="nodeBox" class="node-grid">
+      <div class="node-empty">暂无数据</div>
+    </div>
+  </section>
+
+  <!-- ============ 对等节点 ============ -->
+  <section class="card">
+    <div class="card-head">
+      <h2>对等节点</h2>
+      <div class="head-right">
+        <span id="peerCount" class="tag">0 个</span>
+        <button id="btnRefresh" class="btn btn-sm" title="立即刷新"><span class="btn-ico"></span><span class="btn-txt">刷新</span></button>
+      </div>
+    </div>
+    <div class="legend">
+      <span><i class="sw sw-p2p"></i>直连</span>
+      <span><i class="sw sw-relay"></i>中转</span>
+      <span><i class="sw sw-local"></i>本机</span>
+    </div>
+    <div class="table-wrap">
+      <table id="peerTable">
+        <thead>
+          <tr>
+            <th>主机名</th><th>虚拟 IP</th><th>连接方式</th>
+            <th class="num">延迟</th><th class="num">丢包</th>
+            <th>隧道</th>
+            <th class="num">接收</th><th class="num">发送</th>
+            <th>NAT 类型</th>
+          </tr>
+        </thead>
+        <tbody id="peerBody">
+          <tr><td colspan="9" class="empty">暂无数据</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 子网代理 ============ -->
+  <section class="card">
+    <div class="card-head">
+      <h2>子网代理</h2>
+      <div class="head-right">
+        <span id="proxyCount" class="tag">0 项</span>
+        <span id="proxyActive" class="tag tag-accent">0 条活跃</span>
+      </div>
+    </div>
+    <div id="proxyBox" class="panel-body">
+      <div class="empty-hint">未配置子网代理</div>
+    </div>
+  </section>
+
+  <!-- ============ 路由表 ============ -->
+  <section class="card">
+    <div class="card-head">
+      <h2>路由表</h2>
+      <span id="routeCount" class="tag">0 条</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>节点</th><th>虚拟 IP</th><th class="num">跳数</th><th class="num">路径延迟</th><th>下一跳</th><th>可访问网段</th></tr>
+        </thead>
+        <tbody id="routeBody">
+          <tr><td colspan="6" class="empty">暂无路由</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 端口转发 ============ -->
+  <section class="card">
+    <div class="card-head">
+      <h2>端口转发</h2>
+      <div class="head-right">
+        <span id="fwdCount" class="tag">0 条</span>
+        <span id="fwdActive" class="tag tag-accent">0 条活跃</span>
+      </div>
+    </div>
+    <div id="fwdBox" class="panel-body">
+      <div class="empty-hint">未配置端口转发</div>
+    </div>
+  </section>
+
+  <!-- ============ 活跃转发连接 ============ -->
+  <section class="card">
+    <div class="card-head">
+      <h2>活跃转发连接</h2>
+      <span id="activeCount" class="tag">0 条</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>来源</th><th></th><th>目标</th><th>协议</th><th>状态</th><th>所属规则</th><th>建立时间</th></tr>
+        </thead>
+        <tbody id="activeBody">
+          <tr><td colspan="7" class="empty">暂无活跃连接</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 操作区 ============ -->
+  <section class="card">
+    <div class="card-head"><h2>操作</h2></div>
+    <div class="op-row">
+      <button id="btnLog"  class="btn"><span class="btn-ico"></span><span class="btn-txt">查看日志</span></button>
+      <button id="btnCfg"  class="btn"><span class="btn-ico"></span><span class="btn-txt">编辑配置</span></button>
+      <button id="btnOpenDir" class="btn"><span class="btn-ico"></span><span class="btn-txt">打开目录</span></button>
+
+      <div class="op-sep"></div>
+
+      <label class="switch-wrap" title="开机自动启动本面板">
+        <input type="checkbox" id="chkAutostart">
+        <span class="switch"></span>
+        <span class="switch-label">开机自启</span>
+      </label>
+    </div>
+    <div class="path-line">
+      <span class="muted small" id="pathHint"></span>
+    </div>
+  </section>
+
+</main>
+
+<!-- ============ 日志抽屉 ============ -->
+<div id="drawer" class="drawer">
+  <div class="drawer-head">
+    <h3 id="drawerTitle">日志</h3>
+    <div class="drawer-actions">
+      <button id="btnDrawerRefresh" class="btn btn-sm"><span class="btn-ico"></span><span class="btn-txt">刷新</span></button>
+      <button id="btnDrawerClose" class="btn btn-sm">关闭</button>
+    </div>
+  </div>
+  <pre id="drawerBody" class="drawer-body"></pre>
+</div>
+<div id="overlay" class="overlay"></div>
+
+<!-- ============ 配置编辑弹窗 ============ -->
+<div id="modal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3>编辑配置 <code>config.toml</code></h3>
+      <button id="btnModalClose" class="btn btn-sm">关闭</button>
+    </div>
+    <textarea id="cfgText" spellcheck="false"></textarea>
+    <div class="modal-foot">
+      <span id="cfgMsg" class="muted small"></span>
+      <div>
+        <button id="btnCfgSave" class="btn btn-primary"><span class="btn-ico"></span><span class="btn-txt">校验并保存</span></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
