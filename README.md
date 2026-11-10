@@ -57,7 +57,17 @@ dist/
 
 ### 2. 配置
 
-编辑 `config/config.toml`，至少要改：
+仓库根目录的 `config.example.toml` 是**示例模板**，复制到运行时目录再改：
+
+```bash
+# Windows
+copy config.example.toml dist\config\config.toml
+
+# Linux / macOS
+cp config.example.toml dist/config/config.toml
+```
+
+然后编辑 `dist/config/config.toml`，至少要改：
 
 ```toml
 [network_identity]
@@ -66,7 +76,19 @@ network_secret = "a-strong-random-secret"
 ```
 
 `network_name` 和 `network_secret` 必须与你的其他 EasyTier 节点一致。
+如果需要连到其他节点，还要配 `[[peer]]`（种子地址），否则只能发现自己。
+
 详见 [EasyTier 配置文档](https://easytier.cn/guide/network/configuration-file.html)。
+
+> ⚠️ **注意区分两个文件**
+>
+> | 文件 | 用途 | 是否入库 |
+> |---|---|---|
+> | `config.example.toml` | 示例模板，不含真实参数 | ✅ 会提交 |
+> | `dist/config/config.toml` | 实际运行配置，含真实密钥 | ❌ 已忽略 |
+>
+> 改配置请改 `dist/config/config.toml`，**不要改示例模板**，
+> 也不要拿模板覆盖运行时配置（那样会丢失 peer 和密钥，导致连不上任何节点）。
 
 ### 3. 运行
 
@@ -139,6 +161,7 @@ python scripts/gen_icons.py
 │   └── icons/
 ├── scripts/
 │   └── gen_icons.py           图标生成（纯标准库）
+├── config.example.toml        配置示例模板（复制到 dist/config/ 后修改）
 ├── dist/                      发布包（不入版本控制）
 ├── .gitignore
 ├── LICENSE

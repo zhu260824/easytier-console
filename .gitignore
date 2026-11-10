@@ -37,8 +37,14 @@ __pycache__/
 *.pyc
 
 # 本地个人配置
-# 注意：dist/config/config.toml 是随包分发的示例模板，
-# 真实使用时会填入个人网络参数，请勿提交改动后的版本。
+#
+# 说明：
+#   dist/config/config.toml 是运行时配置，含真实网络名/密钥/peer 地址，
+#   绝不可提交（整个 dist/ 已在上面被忽略）。
+#   仓库里的示例模板是 config.example.toml。
+#
+/config.local.toml
+/config.toml
 /src-tauri/config.local.toml
 .env
 .env.*

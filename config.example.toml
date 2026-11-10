@@ -1,0 +1,92 @@
+# EasyTier 配置示例模板
+#
+# 使用方法：
+#   复制到 dist/config/config.toml，然后改成你自己的网络参数。
+#
+#   Windows:  copy config.example.toml dist\config\config.toml
+#   Linux:    cp config.example.toml dist/config/config.toml
+#
+# ⚠️ 重要：dist/config/config.toml 是运行时配置，含你的真实网络密钥，
+#    不要提交到 git（dist/ 已在 .gitignore 中）。
+#
+# 字段位置说明（以 EasyTier 官方生成格式为准）：
+#   - listeners 属于顶层，不在 [flags] 里
+#   - [flags] 用 enable_xxx，不是 disable_xxx
+#
+# 完整参数文档：https://easytier.cn/guide/network/configuration-file.html
+
+instance_name = "default"
+hostname = "my-pc"
+ipv4 = "10.144.144.11"
+dhcp = false
+
+# 监听端口。只监听 11010 可以避开 faketcp listener（默认会额外起 11013），
+# 后者在某些 NAT 环境下会与内部 TCP 代理抢端口。
+listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]
+
+# ------------------------------------------------------------------
+# 对等节点（peer）
+# ------------------------------------------------------------------
+# 填你自己已知的节点地址，或者公共共享节点。
+# 公共节点列表：https://easytier.cn/guide/network/public-server.html
+#
+# 示例（替换成真实地址后去掉行首的 #）：
+#
+# [[peer]]
+# uri = "tcp://public.easytier.top:11010"
+#
+# [[peer]]
+# uri = "udp://your-server.example.com:11010"
+
+# ------------------------------------------------------------------
+# 子网代理（proxy_network）
+# ------------------------------------------------------------------
+# 把本机所在局域网发布到虚拟网，让其他节点能直接访问该网段。
+#
+# 示例（把 192.168.1.0/24 换成你实际的网段）：
+#
+# [[proxy_network]]
+# cidr = "192.168.1.0/24"
+
+# ------------------------------------------------------------------
+# 端口转发（port_forward）
+# ------------------------------------------------------------------
+# 把虚拟网内的某个端口映射到本机端口。
+# 下面这条是最常见的「远程桌面」配置：虚拟网 IP:13389 → 本机 3389
+#
+# [[port_forward]]
+# bind_addr = "0.0.0.0:13389"
+# dst_addr = "127.0.0.1:3389"
+# proto = "tcp"
+
+# ------------------------------------------------------------------
+# 网络身份（必填）
+# ------------------------------------------------------------------
+# network_name 和 network_secret 必须与你的其他节点一致。
+# 强烈建议改成一串足够长的随机字符，不要用弱口令。
+[network_identity]
+network_name = "my-network"
+network_secret = "change-me-to-a-strong-random-secret"
+
+# ------------------------------------------------------------------
+# 运行参数
+# ------------------------------------------------------------------
+[flags]
+# 使用 EasyTier 内置 NAT 转发，不依赖系统的 IPEnableRouter。
+# 若改成 true，需要先确认系统已开启 IP 转发，否则转发会失效。
+proxy_forward_by_system = false
+
+# Windows 上绑定物理网卡容易引发握手风暴，保持 false。
+bind_device = false
+
+# 关闭 IPv6，减少双栈环境下的干扰。
+enable_ipv6 = false
+
+# 多线程，提升吞吐。
+multi_thread = true
+
+# 延迟优先。某些环境会与 faketcp 冲突，默认关闭。
+latency_first = false
+
+# 保持加密开启。
+enable_encryption = true
