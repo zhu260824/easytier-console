@@ -42,3 +42,6 @@ __pycache__/
 /src-tauri/config.local.toml
 .env
 .env.*
+
+# 本地推送脚本（个人环境用）
+push-to-github.bat
