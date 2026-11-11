@@ -142,7 +142,7 @@ ERROR CORE: error=some instances stopped with errors
 ```toml
 instance_name = "default"
 hostname = "my-pc"
-ipv4 = "10.144.144.11"
+ipv4 = "10.0.0.1"
 dhcp = false
 
 listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]

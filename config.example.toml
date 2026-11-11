@@ -17,7 +17,8 @@
 
 instance_name = "default"
 hostname = "my-pc"
-ipv4 = "10.144.144.11"
+# 改成你所在网段的地址，例如 10.0.0.1（需与其他节点同网段且不重复）
+ipv4 = "10.0.0.1"
 dhcp = false
 
 # 监听端口。只监听 11010 可以避开 faketcp listener（默认会额外起 11013），
