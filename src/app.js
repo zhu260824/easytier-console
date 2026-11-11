@@ -228,11 +228,15 @@ function renderPeers(d) {
   $('peerCount').textContent = peers.length + ' 个';
 
   if (!peers.length) {
-    tb.innerHTML = `<tr><td colspan="9" class="empty">${
+    tb.innerHTML = `<tr><td colspan="10" class="empty">${
       d.running ? (d.peers_error ? '采集失败: ' + esc(d.peers_error) : '暂无对等节点') : '核心未运行'
     }</td></tr>`;
     return;
   }
+
+  // 版本一致性检查：以本机版本为基准，不同的节点标红提示。
+  // 版本不一致是 EasyTier 组网里很常见的故障源（协议不兼容会导致连不上或频繁重连）。
+  const myVer = (peers.find(p => p.kind === 'local') || {}).version || '';
 
   tb.innerHTML = peers.map(p => {
     const costCls = p.kind === 'p2p' ? 'cost-p2p'
@@ -255,6 +259,17 @@ function renderPeers(d) {
       lossCls = loss === 0 ? 'loss-zero' : loss < 5 ? 'loss-bad' : 'loss-worse';
     }
 
+    // 版本显示：只取主版本号部分（2.7.0），commit 后缀太长会撑破表格
+    const verFull = p.version || '';
+    const verShort = verFull ? verFull.split('-')[0] : '';
+    const verMismatch = !!(myVer && verFull && verFull !== myVer && p.kind !== 'local');
+    const verTip = verFull
+      ? `完整版本: ${verFull}${verMismatch ? '\n与本机(' + myVer + ')不一致，可能影响互通' : ''}`
+      : '该节点未上报版本';
+    const verHtml = verShort
+      ? `<span class="ver${verMismatch ? ' ver-diff' : ''}" title="${esc(verTip)}">${esc(verShort)}${verMismatch ? ' ⚠' : ''}</span>`
+      : '<span class="muted">—</span>';
+
     return `<tr>
       <td class="hostname">${esc(p.hostname || '—')}</td>
       <td class="mono">${esc(p.ipv4 || '—')}</td>
@@ -265,6 +280,7 @@ function renderPeers(d) {
       <td class="num muted small">${esc(p.rx || '—')}</td>
       <td class="num muted small">${esc(p.tx || '—')}</td>
       <td class="small">${esc(p.nat_label || '—')}</td>
+      <td class="small">${verHtml}</td>
     </tr>`;
   }).join('');
 }

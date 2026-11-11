@@ -1392,11 +1392,30 @@ fn run_selftest() -> i32 {
                     println!("  proxies   : {}", s.proxies.len());
                     println!("  node      : {}", if s.node.is_some() { "有" } else { "无" });
                     if !s.peers.is_empty() {
+                        // 以本机版本为基准，标出版本不一致的节点
+                        let my_ver = s
+                            .peers
+                            .iter()
+                            .find(|p| p.kind == "local")
+                            .map(|p| p.version.clone())
+                            .unwrap_or_default();
+
                         println!("  对等节点列表:");
                         for p in s.peers.iter().take(10) {
+                            let short = p
+                                .version
+                                .split('-')
+                                .next()
+                                .unwrap_or("")
+                                .to_string();
+                            let diff = !my_ver.is_empty()
+                                && !p.version.is_empty()
+                                && p.version != my_ver
+                                && p.kind != "local";
+                            let mark = if diff { "  [版本不一致]" } else { "" };
                             println!(
-                                "    {:<16} {:<16} {:<8} {} ms  {}",
-                                p.hostname, p.ipv4, p.cost, p.lat_ms, p.nat_label
+                                "    {:<16} {:<16} {:<8} {} ms  {:<12} v{}{}",
+                                p.hostname, p.ipv4, p.cost, p.lat_ms, p.nat_label, short, mark
                             );
                         }
                     }
