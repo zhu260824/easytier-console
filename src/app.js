@@ -219,70 +219,798 @@ function renderNode(d) {
   $('nodeVersion').textContent = n.version ? 'v' + n.version.split('-')[0] : '';
 }
 
-/* ---------------- 渲染：对等节点 ---------------- */
-/* 列顺序：主机名 / 虚拟IP / 连接方式 / 延迟 / 丢包 / 隧道 / 接收 / 发送 / NAT类型 */
+/* ------------------------------------------------------------
+ * 渲染：对等节点（列可配置 / 可排序 / 可搜索 / 延迟趋势）
+ *
+ * 设计要点：
+ *   1. 列定义抽成 PEER_COLS 数组，表头与每行都从同一数组渲染，
+ *      天然不会出现「表头与列错位」——这也是不用 nth-child 隐藏列的原因。
+ *   2. 列顺序与显隐存 localStorage，重启保留。
+ *   3. 延迟趋势用内存环形缓冲，只保留最近 30 次采样。
+ *      sparkline 不做独立 Y 轴缩放：跨行同一基准，否则 1ms 抖动
+ *      会和 200ms 断崖看起来一样。
+ * ------------------------------------------------------------ */
+
+/* 列定义：顺序即默认显示顺序 */
+const PEER_COLS = [
+  { key: 'hostname', label: '主机名',   locked: true,  align: 'left',  sortable: true },
+  { key: 'ipv4',     label: '虚拟 IP',  locked: false, align: 'left',  sortable: true },
+  { key: 'cost',     label: '连接方式', locked: false, align: 'left',  sortable: false },
+  { key: 'lat',      label: '延迟',     locked: false, align: 'right', sortable: true },
+  { key: 'loss',     label: '丢包',     locked: false, align: 'right', sortable: true },
+  { key: 'ver',      label: '版本',     locked: false, align: 'left',  sortable: true },
+  { key: 'tunnel',   label: '隧道',     locked: false, align: 'left',  sortable: true },
+  { key: 'rx',       label: '接收',     locked: false, align: 'right', sortable: true },
+  { key: 'tx',       label: '发送',     locked: false, align: 'right', sortable: true },
+  { key: 'nat',      label: 'NAT 类型', locked: false, align: 'left',  sortable: true },
+];
+
+const COLS_KEY = 'easytier.peerCols';
+const THEME_KEY = 'easytier.theme';
+const SPARK_LEN = 30;
+
+/* 列配置：从 localStorage 恢复，并做一次合法性校验
+   （用户可能手动改过存储，或版本升级后列增减） */
+function loadCols() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(COLS_KEY) || 'null'); } catch (_) {}
+
+  const base = PEER_COLS.map(c => ({ ...c, visible: true }));
+  if (!Array.isArray(saved) || !saved.length) return base;
+
+  const byKey = {};
+  base.forEach(c => { byKey[c.key] = c; });
+
+  const out = [];
+  saved.forEach(it => {
+    if (!it || !it.key) return;
+    const def = byKey[it.key];
+    if (!def) return;                 // 已删除的列，忽略
+    out.push({ ...def, visible: it.visible !== false });
+    delete byKey[it.key];
+  });
+  // 新增的列（老配置里没有）追加到末尾
+  Object.values(byKey).forEach(c => out.push({ ...c, visible: true }));
+
+  // 锁定列必须可见
+  out.forEach(c => { if (c.locked) c.visible = true; });
+  return out;
+}
+
+let peerCols = loadCols();
+let peerSort = { key: null, dir: 0 };   // dir: 0 无序 / 1 升 / -1 降
+let peerKeyword = '';
+
+/* 延迟历史：hostname -> [ms, ms, ...] */
+const latHistory = new Map();
+let lastPeers = [];
+
+function saveCols() {
+  try {
+    localStorage.setItem(COLS_KEY, JSON.stringify(
+      peerCols.map(c => ({ key: c.key, visible: c.visible }))
+    ));
+  } catch (_) {}
+}
+
+/* 把一次采样推进历史缓冲 */
+function pushLatHistory(peers) {
+  peers.forEach(p => {
+    if (p.kind === 'local') return;
+    const v = parseFloat(p.lat_ms);
+    if (isNaN(v)) return;
+    const k = p.hostname || p.id || '?';
+    let arr = latHistory.get(k);
+    if (!arr) { arr = []; latHistory.set(k, arr); }
+    arr.push(v);
+    if (arr.length > SPARK_LEN) arr.shift();
+  });
+  // 清理已消失节点，避免 Map 无限增长
+  const alive = new Set(peers.map(p => p.hostname || p.id || '?'));
+  for (const k of latHistory.keys()) {
+    if (!alive.has(k)) latHistory.delete(k);
+  }
+}
+
+/* 延迟趋势线。color 与左侧数字同色，保持语义一致 */
+function sparkSVG(arr, color) {
+  if (!arr || arr.length < 2) return '';
+  const W = 44, H = 15, PAD = 1.5;
+  let min = Math.min(...arr), max = Math.max(...arr);
+  const span = Math.max(max - min, 0.01);
+  const pts = arr.map((v, i) => {
+    const x = PAD + (i / (arr.length - 1)) * (W - PAD * 2);
+    const y = PAD + (1 - (v - min) / span) * (H - PAD * 2);
+    return [x, y];
+  });
+  const d = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  const area = d + ` L${(W - PAD).toFixed(1)} ${H} L${PAD} ${H} Z`;
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <path d="${area}" fill="${color}" fill-opacity=".16"/>
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="1.4"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+}
+
+function latColor(v) {
+  if (isNaN(v)) return 'var(--txt-mute)';
+  if (v < 15) return 'var(--green)';
+  if (v < 50) return 'var(--txt-dim)';
+  if (v < 150) return 'var(--orange)';
+  return 'var(--red)';
+}
+
+/* 异常判定：丢包 ≥5% / 延迟 ≥150ms / 版本与本机不一致 */
+function isAbnormalPeer(p, myVer) {
+  if (p.kind === 'local') return false;
+  const loss = parseFloat(p.loss_rate);
+  const lat = parseFloat(p.lat_ms);
+  if (!isNaN(loss) && loss >= 5) return true;
+  if (!isNaN(lat) && lat >= 150) return true;
+  if (myVer && p.version && p.version !== myVer) return true;
+  return false;
+}
+
+/* 渲染表头 */
+function renderPeerHead() {
+  const head = $('peerHead');
+  if (!head) return;
+  const vis = peerCols.filter(c => c.visible);
+
+  head.innerHTML = '<tr>' + vis.map(c => {
+    const isSorted = peerSort.key === c.key;
+    const cls = [
+      c.align === 'right' ? 'num' : '',
+      isSorted ? 'sorted' : '',
+      c.locked ? 'locked-col' : ''
+    ].filter(Boolean).join(' ');
+
+    let ico;
+    if (isSorted && peerSort.dir === 1) {
+      ico = '<svg viewBox="0 0 10 12"><path d="M5 1L9 7H1z"/></svg>';
+    } else if (isSorted && peerSort.dir === -1) {
+      ico = '<svg viewBox="0 0 10 12"><path d="M5 11L1 5h8z"/></svg>';
+    } else {
+      ico = '<svg viewBox="0 0 10 12"><path d="M5 1L9 6H1z" opacity=".6"/><path d="M5 11L1 6h8z" opacity=".6"/></svg>';
+    }
+
+    const click = c.sortable
+      ? ` data-sort="${c.key}"`
+      : '';
+    const title = c.sortable ? '点击排序' : '';
+
+    return `<th class="${cls}"${click} title="${title}">
+      <span class="th-in">${esc(c.label)}<span class="sort-ico">${ico}</span></span>
+    </th>`;
+  }).join('') + '</tr>';
+}
+
+/* 点击表头排序 */
+function onHeadClick(e) {
+  const th = e.target.closest('th[data-sort]');
+  if (!th) return;
+  const key = th.dataset.sort;
+  if (peerSort.key === key) {
+    peerSort.dir = peerSort.dir === 0 ? 1 : peerSort.dir === 1 ? -1 : 0;
+    if (peerSort.dir === 0) peerSort.key = null;
+  } else {
+    peerSort.key = key;
+    peerSort.dir = 1;
+  }
+  if (lastStatus) renderPeers(lastStatus);
+}
+
+/* 取排序用值 */
+function sortVal(p, key) {
+  switch (key) {
+    case 'hostname': return p.hostname || '';
+    case 'ipv4':     return p.ipv4 || '';
+    case 'lat':      return parseFloat(p.lat_ms);
+    case 'loss':     return parseFloat(p.loss_rate);
+    case 'ver':      return (p.version || '').split('-')[0];
+    case 'tunnel':   return p.tunnel_proto || '';
+    case 'rx':       return p.rx_bytes || '';
+    case 'tx':       return p.tx_bytes || '';
+    case 'nat':      return p.nat_label || '';
+    default:         return '';
+  }
+}
+
+let lastStatus = null;
 
 function renderPeers(d) {
+  lastStatus = d;
   const tb = $('peerBody');
+  if (!tb) return;
   const peers = d.peers || [];
+  pushLatHistory(peers);
+
+  // 本机版本，作为版本一致性基准
+  const myVer = (peers.find(p => p.kind === 'local') || {}).version || '';
+
   $('peerCount').textContent = peers.length + ' 个';
 
-  if (!peers.length) {
-    tb.innerHTML = `<tr><td colspan="10" class="empty">${
-      d.running ? (d.peers_error ? '采集失败: ' + esc(d.peers_error) : '暂无对等节点') : '核心未运行'
-    }</td></tr>`;
+  // 异常计数
+  const abnCount = peers.filter(p => isAbnormalPeer(p, myVer)).length;
+  const abnTag = $('abnormalTag');
+  if (abnTag) {
+    if (abnCount > 0) {
+      abnTag.textContent = abnCount + ' 个异常';
+      abnTag.style.display = '';
+    } else {
+      abnTag.style.display = 'none';
+    }
+  }
+
+  renderPeerHead();
+  updateColCount();
+
+  const vis = peerCols.filter(c => c.visible);
+  const colspan = Math.max(vis.length, 1);
+
+  // 过滤 + 排序
+  let rows = peers.slice();
+
+  if (peerKeyword) {
+    const kw = peerKeyword.toLowerCase();
+    rows = rows.filter(p =>
+      String(p.hostname || '').toLowerCase().includes(kw) ||
+      String(p.ipv4 || '').includes(kw)
+    );
+  }
+
+  if (peerSort.key && peerSort.dir) {
+    rows.sort((a, b) => {
+      // 本机永远置顶，不参与排序
+      if (a.kind === 'local') return -1;
+      if (b.kind === 'local') return 1;
+      let va = sortVal(a, peerSort.key);
+      let vb = sortVal(b, peerSort.key);
+      const na = (va === undefined || va === null || va === '' || (typeof va === 'number' && isNaN(va)));
+      const nb = (vb === undefined || vb === null || vb === '' || (typeof vb === 'number' && isNaN(vb)));
+      if (na && nb) return 0;
+      if (na) return 1;
+      if (nb) return -1;
+      if (typeof va === 'number') return (va - vb) * peerSort.dir;
+      return String(va).localeCompare(String(vb), 'zh') * peerSort.dir;
+    });
+  }
+
+  // 空状态：区分「未运行 / 采集失败 / 搜索无结果 / 真的没节点」
+  if (!rows.length) {
+    let ico, title, desc, action = '';
+    if (!d.running) {
+      ico = '<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>';
+      title = '核心未运行';
+      desc = '点击顶部「启动」按钮启动 EasyTier 核心';
+    } else if (peerKeyword) {
+      ico = '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>';
+      title = '没有匹配的节点';
+      desc = `没有主机名或 IP 包含「${esc(peerKeyword)}」的节点`;
+      action = '<button class="btn btn-sm" data-clear-search>清空搜索</button>';
+    } else if (d.peers_error) {
+      ico = '<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>';
+      title = '采集失败';
+      desc = esc(d.peers_error);
+    } else {
+      ico = '<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>';
+      title = '暂无对等节点';
+      desc = '检查配置里的 [[peer]] 种子地址是否填写正确';
+    }
+    tb.innerHTML = `<tr><td colspan="${colspan}" class="empty-cell">
+      <div class="empty-box">
+        <div class="e-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.5" stroke-linecap="round">${ico}</svg></div>
+        <div class="e-title">${title}</div>
+        <div class="e-desc">${desc}</div>
+        ${action}
+      </div>
+    </td></tr>`;
     return;
   }
 
-  // 版本一致性检查：以本机版本为基准，不同的节点标红提示。
-  // 版本不一致是 EasyTier 组网里很常见的故障源（协议不兼容会导致连不上或频繁重连）。
-  const myVer = (peers.find(p => p.kind === 'local') || {}).version || '';
+  tb.innerHTML = rows.map(p => {
+    const isLocal = p.kind === 'local';
+    const abnormal = isAbnormalPeer(p, myVer);
+    const rowCls = [isLocal ? 'local-row' : '', abnormal ? 'abnormal-row' : '']
+      .filter(Boolean).join(' ');
 
-  tb.innerHTML = peers.map(p => {
-    const costCls = p.kind === 'p2p' ? 'cost-p2p'
-                  : p.kind === 'relay' ? 'cost-relay'
-                  : 'cost-local';
-    const costLabel = p.kind === 'local' ? '本机'
-                    : p.kind === 'p2p' ? '直连'
-                    : p.cost;
+    const cells = vis.map(c => {
+      switch (c.key) {
+        case 'hostname':
+          return `<td class="hostname">${esc(p.hostname || '—')}</td>`;
 
-    let latCls = 'loss-zero', latTxt = p.lat_ms;
-    const lat = parseFloat(p.lat_ms);
-    if (!isNaN(lat)) {
-      latCls = lat < 15 ? 'lat-good' : lat < 50 ? 'lat-mid' : lat < 150 ? 'lat-bad' : 'lat-verybad';
-      latTxt = lat.toFixed(1) + ' ms';
-    }
+        case 'ipv4':
+          return p.ipv4
+            ? `<td class="mono"><span class="ip-cell" data-ip="${esc(p.ipv4)}" title="点击复制">
+                 ${esc(p.ipv4)}
+                 <span class="ip-copy"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg></span>
+               </span></td>`
+            : '<td class="mono muted">—</td>';
 
-    let lossCls = 'loss-zero', lossTxt = p.loss_rate;
-    const loss = parseFloat(p.loss_rate);
-    if (!isNaN(loss)) {
-      lossCls = loss === 0 ? 'loss-zero' : loss < 5 ? 'loss-bad' : 'loss-worse';
-    }
+        case 'cost': {
+          const k = p.kind;
+          const cls = k === 'p2p' ? 'cost-p2p' : k === 'relay' ? 'cost-relay' : 'cost-local';
+          const label = k === 'local' ? '本机' : k === 'p2p' ? '直连' : p.cost;
+          return `<td><span class="cost-cell ${cls}"><i class="cost-dot"></i>${esc(label)}</span></td>`;
+        }
 
-    // 版本显示：只取主版本号部分（2.7.0），commit 后缀太长会撑破表格
-    const verFull = p.version || '';
-    const verShort = verFull ? verFull.split('-')[0] : '';
-    const verMismatch = !!(myVer && verFull && verFull !== myVer && p.kind !== 'local');
-    const verTip = verFull
-      ? `完整版本: ${verFull}${verMismatch ? '\n与本机(' + myVer + ')不一致，可能影响互通' : ''}`
-      : '该节点未上报版本';
-    const verHtml = verShort
-      ? `<span class="ver${verMismatch ? ' ver-diff' : ''}" title="${esc(verTip)}">${esc(verShort)}${verMismatch ? ' ⚠' : ''}</span>`
-      : '<span class="muted">—</span>';
+        case 'lat': {
+          const lat = parseFloat(p.lat_ms);
+          let cls = 'loss-zero', txt = p.lat_ms;
+          if (!isNaN(lat)) {
+            cls = lat < 15 ? 'lat-good' : lat < 50 ? 'lat-mid' : lat < 150 ? 'lat-bad' : 'lat-verybad';
+            txt = lat.toFixed(2) + ' ms';
+          }
+          const hist = latHistory.get(p.hostname || p.id || '?');
+          const spark = (!isLocal && !isNaN(lat)) ? sparkSVG(hist, latColor(lat)) : '';
+          return `<td class="num ${cls}">
+            <span class="lat-cell">
+              <span class="lat-val">${esc(txt || '—')}</span>${spark}
+            </span>
+          </td>`;
+        }
 
-    return `<tr>
-      <td class="hostname">${esc(p.hostname || '—')}</td>
-      <td class="mono">${esc(p.ipv4 || '—')}</td>
-      <td><span class="cost-cell ${costCls}"><i class="cost-dot"></i>${esc(costLabel)}</span></td>
-      <td class="num ${latCls}">${esc(latTxt || '—')}</td>
-      <td class="num ${lossCls}">${esc(lossTxt || '—')}</td>
-      <td>${p.tunnel_proto ? `<span class="proto">${esc(p.tunnel_proto)}</span>` : '—'}</td>
-      <td class="num muted small">${esc(p.rx || '—')}</td>
-      <td class="num muted small">${esc(p.tx || '—')}</td>
-      <td class="small">${esc(p.nat_label || '—')}</td>
-      <td class="small">${verHtml}</td>
-    </tr>`;
+        case 'loss': {
+          const loss = parseFloat(p.loss_rate);
+          let cls = 'loss-zero', txt = p.loss_rate;
+          if (!isNaN(loss)) {
+            cls = loss === 0 ? 'loss-zero' : loss < 5 ? 'loss-bad' : 'loss-worse';
+            txt = loss.toFixed(1) + '%';
+          }
+          return `<td class="num ${cls}">${esc(txt || '—')}</td>`;
+        }
+
+        case 'ver': {
+          const full = p.version || '';
+          const short = full ? full.split('-')[0] : '';
+          const diff = !!(myVer && full && full !== myVer && !isLocal);
+          const tip = full
+            ? `完整版本: ${full}${diff ? '\n与本机(' + myVer + ')不一致，可能影响互通' : ''}`
+            : '该节点未上报版本';
+          return `<td>${short
+            ? `<span class="ver${diff ? ' ver-diff' : ''}" title="${esc(tip)}">${esc(short)}${diff ? ' ⚠' : ''}</span>`
+            : '<span class="muted">—</span>'}</td>`;
+        }
+
+        case 'tunnel':
+          return `<td>${p.tunnel_proto ? `<span class="proto">${esc(p.tunnel_proto)}</span>` : '—'}</td>`;
+
+        case 'rx':
+          return `<td class="num muted small">${esc(p.rx_bytes || '—')}</td>`;
+
+        case 'tx':
+          return `<td class="num muted small">${esc(p.tx_bytes || '—')}</td>`;
+
+        case 'nat':
+          return `<td class="small">${esc(p.nat_label || '—')}</td>`;
+
+        default:
+          return '<td>—</td>';
+      }
+    }).join('');
+
+    return `<tr class="${rowCls}">${cells}</tr>`;
   }).join('');
+}
+
+/* ---------------- 列设置面板 ---------------- */
+
+function updateColCount() {
+  const el = $('colCount');
+  if (!el) return;
+  const vis = peerCols.filter(c => c.visible).length;
+  el.textContent = vis === peerCols.length ? '' : `${vis}/${peerCols.length}`;
+}
+
+/* ---------------- 列设置面板 ----------------
+ *
+ * 拖拽为什么不用 HTML5 原生 draggable：
+ *   原生 draggable 与点击事件冲突严重——按下就进入拖拽态，
+ *   勾选框的 click 经常收不到，用户感觉「点不动、要点好几下」。
+ *   而且 webview2 里原生拖拽的 ghost image 表现也不稳定。
+ *
+ *   改用 pointer 事件手写：
+ *     · 只有按住左侧手柄（或整行拖动超过 4px）才进入拖拽
+ *     · 位移未超过阈值就当普通点击，勾选照常响应
+ *     · 拖拽时用 transform 跟手，并实时计算插入位置
+ * ------------------------------------------ */
+
+function renderColList() {
+  const box = $('colList');
+  if (!box) return;
+  box.innerHTML = peerCols.map((c, i) => `
+    <div class="col-item ${c.visible ? 'check' : ''}" data-idx="${i}">
+      <span class="grip" data-grip>⣿</span>
+      <span class="cb" data-toggle>${c.visible
+        ? '<svg viewBox="0 0 10 10"><path d="M2 5l2.4 2.4L8 3" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+        : ''}</span>
+      <span class="name" data-toggle>${esc(c.label)}</span>
+      ${c.locked
+        ? '<span class="lock">锁定</span>'
+        : (c.visible ? '' : '<span class="hide-tip">已隐藏</span>')}
+    </div>
+  `).join('');
+}
+
+/* 拖拽状态 */
+let colDrag = null;
+let justDragged = false;   // 刚完成拖拽，抑制紧随其后的 click
+
+function initColPanel() {
+  const btn = $('btnCol');
+  const panel = $('colPanel');
+  const list = $('colList');
+  if (!btn || !panel || !list) return;
+
+  const setOpen = (on) => {
+    panel.classList.toggle('open', on);
+    btn.classList.toggle('on', on);
+    if (on) renderColList();
+    else if (colDrag) endColDrag();
+  };
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setOpen(!panel.classList.contains('open'));
+  });
+
+  /* ---------- 点击勾选 ---------- */
+  list.addEventListener('click', (e) => {
+    // 刚拖拽结束的那一下不要触发勾选
+    if (justDragged) return;
+    const t = e.target.closest('[data-toggle]');
+    if (!t) return;
+    const item = t.closest('.col-item');
+    if (!item) return;
+    const c = peerCols[+item.dataset.idx];
+    if (!c || c.locked) return;
+
+    c.visible = !c.visible;
+    saveCols();
+    renderColList();
+    renderPeers(lastStatus || {});
+  });
+
+  /* ---------- pointer 拖拽 ---------- */
+  const DRAG_THRESHOLD = 4;   // 位移超过 4px 才算拖拽
+
+  list.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const item = e.target.closest('.col-item');
+    if (!item) return;
+
+    const idx = +item.dataset.idx;
+    const rect = item.getBoundingClientRect();
+
+    colDrag = {
+      idx,
+      startY: e.clientY,
+      startX: e.clientX,
+      itemH: rect.height,
+      listRect: list.getBoundingClientRect(),
+      moved: false,
+      item,
+      pointerId: e.pointerId,
+      // 记录所有 item 的初始位置，用于计算插入点
+      slots: Array.from(list.querySelectorAll('.col-item')).map(el => {
+        const r = el.getBoundingClientRect();
+        return { top: r.top, height: r.height, idx: +el.dataset.idx };
+      }),
+      targetIdx: idx,
+    };
+  });
+
+  list.addEventListener('pointermove', (e) => {
+    if (!colDrag || e.pointerId !== colDrag.pointerId) return;
+
+    const dy = e.clientY - colDrag.startY;
+    const dx = e.clientX - colDrag.startX;
+
+    if (!colDrag.moved) {
+      if (Math.abs(dy) < DRAG_THRESHOLD && Math.abs(dx) < DRAG_THRESHOLD) return;
+      colDrag.moved = true;
+      colDrag.item.classList.add('dragging');
+      list.setPointerCapture(e.pointerId);
+      list.classList.add('dragging-active');
+    }
+
+    // 跟手位移
+    colDrag.item.style.transform = `translateY(${dy}px)`;
+
+    // 计算当前应在哪个位置
+    const pointerY = e.clientY;
+    let target = 0;
+    for (const s of colDrag.slots) {
+      const center = s.top + s.height / 2;
+      if (pointerY > center) target++;
+    }
+    target = Math.max(0, Math.min(colDrag.slots.length - 1, target));
+    if (target !== colDrag.targetIdx) {
+      colDrag.targetIdx = target;
+      // 用其它行的位移做视觉提示
+      list.querySelectorAll('.col-item').forEach(el => {
+        if (el === colDrag.item) return;
+        const i = +el.dataset.idx;
+        const from = i;
+        const to = target <= colDrag.idx
+          ? (from >= target && from < colDrag.idx ? from + 1 : from)
+          : (from > colDrag.idx && from <= target ? from - 1 : from);
+        const shift = to - from;
+        el.style.transform = shift ? `translateY(${shift * colDrag.itemH}px)` : '';
+      });
+    }
+  });
+
+  const finish = (e) => {
+    if (!colDrag) return;
+    const d = colDrag;
+    const from = d.idx;
+    const to = d.targetIdx;
+    const moved = d.moved;
+    endColDrag();
+
+    if (!moved || from === to) return;
+    // 执行重排
+    const [m] = peerCols.splice(from, 1);
+    peerCols.splice(to, 0, m);
+    saveCols();
+    renderColList();
+    renderPeers(lastStatus || {});
+  };
+
+  list.addEventListener('pointerup', finish);
+  list.addEventListener('pointercancel', () => endColDrag());
+
+  function endColDrag() {
+    if (!colDrag) return;
+    const wasMoved = colDrag.moved;
+    colDrag.item.classList.remove('dragging');
+    colDrag.item.style.transform = '';
+    list.querySelectorAll('.col-item').forEach(el => { el.style.transform = ''; });
+    list.classList.remove('dragging-active');
+    colDrag = null;
+
+    // 拖拽刚结束，抑制接下来的 click（避免误勾选）
+    if (wasMoved) {
+      justDragged = true;
+      setTimeout(() => { justDragged = false; }, 80);
+    }
+  }
+
+  /* ---------- 恢复默认 ---------- */
+  const reset = $('btnColReset');
+  if (reset) {
+    reset.addEventListener('click', () => {
+      peerCols = PEER_COLS.map(c => ({ ...c, visible: true }));
+      peerSort = { key: null, dir: 0 };
+      saveCols();
+      renderColList();
+      renderPeers(lastStatus || {});
+      toast('已恢复默认列设置');
+    });
+  }
+
+  /* ---------- 关闭 ---------- */
+  document.addEventListener('click', (e) => {
+    if (!panel.classList.contains('open')) return;
+    if (panel.contains(e.target) || btn.contains(e.target)) return;
+    setOpen(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && panel.classList.contains('open')) setOpen(false);
+  });
+}
+
+/* ---------------- 搜索 ---------------- */
+
+function initPeerSearch() {
+  const inp = $('searchInput');
+  const box = $('searchBox');
+  const clr = $('btnSearchClear');
+  if (!inp) return;
+
+  inp.addEventListener('input', () => {
+    peerKeyword = inp.value.trim();
+    box.classList.toggle('has-val', !!inp.value);
+    renderPeers(lastStatus || {});
+  });
+
+  const clear = () => {
+    inp.value = '';
+    peerKeyword = '';
+    box.classList.remove('has-val');
+    renderPeers(lastStatus || {});
+    inp.focus();
+  };
+
+  if (clr) clr.addEventListener('click', clear);
+
+  // 空状态里的「清空搜索」按钮
+  const tb = $('peerBody');
+  if (tb) {
+    tb.addEventListener('click', (e) => {
+      if (e.target.closest('[data-clear-search]')) clear();
+    });
+  }
+}
+
+/* ---------------- IP 复制 ---------------- */
+
+function initPeerTable() {
+  const tb = $('peerBody');
+  const head = $('peerHead');
+  if (head) head.addEventListener('click', onHeadClick);
+  if (!tb) return;
+
+  tb.addEventListener('click', async (e) => {
+    const cell = e.target.closest('.ip-cell');
+    if (!cell) return;
+    const ip = cell.dataset.ip;
+    if (!ip) return;
+    try {
+      await navigator.clipboard.writeText(ip);
+      const old = cell.innerHTML;
+      cell.innerHTML = '<span style="color:var(--green);font-weight:600">已复制</span>';
+      setTimeout(() => { cell.innerHTML = old; }, 1000);
+    } catch (_) {
+      toast('复制失败，请手动选择', 'err');
+    }
+  });
+}
+
+/* ---------------- 主题 ---------------- */
+
+/* ---------------- 主题 ----------------
+ *
+ * 5 套固定配色 + 1 个「跟随系统」。
+ *
+ * 为什么不做自由配色（色轮/自定义）：
+ *   这个界面有大量语义色（延迟绿/黄/橙/红、告警橙、状态绿）。
+ *   一旦允许用户自定义主色，很容易选出与语义色撞车的主色，
+ *   用户就分不清「这是主题色还是告警色」。所以只提供
+ *   经过调校、语义色仍然可辨的几套预设。
+ * ------------------------------------------ */
+
+const THEMES = [
+  { id: 'dark',     name: '深色',     dark: true,  bg: '#0f1319', accent: '#3b82f6' },
+  { id: 'light',    name: '浅色',     dark: false, bg: '#f5f7fa', accent: '#2563eb' },
+  { id: 'midnight', name: '午夜蓝',   dark: true,  bg: '#0b1020', accent: '#6366f1' },
+  { id: 'sand',     name: '暖沙',     dark: false, bg: '#f7f3ec', accent: '#b45309' },
+  { id: 'forest',   name: '墨绿',     dark: true,  bg: '#0c1512', accent: '#10b981' },
+  { id: 'auto',     name: '跟随系统', dark: null,  bg: 'auto',    accent: '#64748b' },
+];
+
+const SUN_ICO = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
+const MOON_ICO = '<svg viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>';
+const AUTO_ICO = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v18" /><path d="M12 3a9 9 0 010 18" fill="currentColor" stroke="none" opacity=".55"/></svg>';
+const TICK_ICO = '<svg viewBox="0 0 10 10"><path d="M2 5l2.4 2.4L8 3"/></svg>';
+
+let themeChoice = 'dark';   // 用户选择（可能是 auto）
+
+/** 系统是否偏好深色 */
+function systemPrefersDark() {
+  try {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  } catch (_) {
+    return true;
+  }
+}
+
+/** 把「用户选择」解析成实际生效的主题 id */
+function resolveTheme(choice) {
+  if (choice !== 'auto') return choice;
+  return systemPrefersDark() ? 'dark' : 'light';
+}
+
+/** 应用主题（choice 是用户选择，含 auto） */
+function applyTheme(choice) {
+  themeChoice = choice;
+  const actual = resolveTheme(choice);
+
+  document.documentElement.dataset.theme = actual;
+  // 告诉浏览器这是深色还是浅色，影响原生控件与滚动条
+  document.documentElement.style.colorScheme =
+    (THEMES.find(t => t.id === actual) || {}).dark ? 'dark' : 'light';
+
+  // 按钮图标：跟随实际生效主题，auto 时显示自动图标
+  const ico = $('themeIco');
+  if (ico) {
+    if (choice === 'auto') ico.innerHTML = AUTO_ICO;
+    else ico.innerHTML = actual === 'light' || actual === 'sand' ? SUN_ICO : MOON_ICO;
+  }
+
+  const btn = $('btnTheme');
+  if (btn) {
+    const cur = THEMES.find(t => t.id === choice) || { name: '深色' };
+    btn.title = '主题：' + cur.name;
+  }
+}
+
+function saveTheme(choice) {
+  try { localStorage.setItem(THEME_KEY, choice); } catch (_) {}
+}
+
+/** 渲染主题列表（含配色小样） */
+function renderThemeList() {
+  const box = $('themeList');
+  if (!box) return;
+
+  box.innerHTML = THEMES.map(t => {
+    let preview;
+    if (t.id === 'auto') {
+      // 自动：左深右浅的斜分块
+      preview = `<span class="sw-preview" style="background:linear-gradient(100deg,#0f1319 0 50%,#f5f7fa 50% 100%)"></span>`;
+    } else {
+      preview = `<span class="sw-preview">
+        <i style="background:${t.bg}"></i>
+        <i style="background:${t.accent}"></i>
+      </span>`;
+    }
+    return `<div class="theme-item ${themeChoice === t.id ? 'on' : ''}" data-theme-id="${t.id}">
+      ${preview}
+      <span class="tn">${t.name}</span>
+      <span class="tick">${TICK_ICO}</span>
+    </div>`;
+  }).join('');
+}
+
+function initTheme() {
+  let saved = 'dark';
+  try {
+    const v = localStorage.getItem(THEME_KEY);
+    if (v && THEMES.some(t => t.id === v)) saved = v;
+    else if (v === 'light' || v === 'dark') saved = v;
+  } catch (_) {}
+
+  applyTheme(saved);
+  renderThemeList();
+
+  const btn = $('btnTheme');
+  const panel = $('themePanel');
+  if (!btn || !panel) return;
+
+  const setOpen = (on) => {
+    panel.classList.toggle('open', on);
+    btn.classList.toggle('on', on);
+    if (on) renderThemeList();
+  };
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setOpen(!panel.classList.contains('open'));
+  });
+
+  // 选择主题
+  panel.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-theme-id]');
+    if (!item) return;
+    const id = item.dataset.themeId;
+    applyTheme(id);
+    saveTheme(id);
+    renderThemeList();
+    setOpen(false);
+  });
+
+  // 点外部 / Esc 关闭
+  document.addEventListener('click', (e) => {
+    if (!panel.classList.contains('open')) return;
+    if (panel.contains(e.target) || btn.contains(e.target)) return;
+    setOpen(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && panel.classList.contains('open')) setOpen(false);
+  });
+
+  // 选「跟随系统」时，系统主题变化要实时生效
+  try {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => {
+      if (themeChoice === 'auto') applyTheme('auto');
+    };
+    if (mq.addEventListener) mq.addEventListener('change', onChange);
+    else if (mq.addListener) mq.addListener(onChange);
+  } catch (_) {}
 }
 
 /* ---------------- 渲染：子网代理 ---------------- */
@@ -741,6 +1469,16 @@ async function saveConfig() {
 /* ---------------- 初始化 ---------------- */
 
 async function init() {
+  // 主题要最先应用，避免首屏闪一下深色
+  initTheme();
+
+  // 对等节点表格的交互（排序 / 列设置 / 搜索 / 复制）
+  initPeerTable();
+  initColPanel();
+  initPeerSearch();
+  renderColList();
+  renderPeerHead();
+
   try {
     const j = await api('/api/meta');
     if (j.ok) {

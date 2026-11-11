@@ -54,3 +54,6 @@ push-to-github.bat
 
 # 打包产物（Release 上传用）
 /build-release/
+
+# 设计效果图（含真实节点名与内网 IP，仅本地预览用，不入库）
+/design-preview/

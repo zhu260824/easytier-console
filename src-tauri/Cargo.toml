@@ -1,6 +1,6 @@
 [package]
 name = "easytier-console"
-version = "1.0.0"
+version = "1.1.0"
 description = "EasyTier 网络控制台 —— 查看节点状态、子网代理、端口转发与路由，一键启停核心"
 authors = []
 edition = "2021"
