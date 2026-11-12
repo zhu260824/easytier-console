@@ -140,6 +140,65 @@ async function api(path, opts) {
       if (path === '/api/stop')    return { ok: true, message: await invokeCmd('stop_core') };
       if (path === '/api/restart') return { ok: true, message: await invokeCmd('restart_core') };
 
+      // ---- 应用设置 ----
+      if (path === '/api/settings') {
+        if (method === 'POST') {
+          await invokeCmd('save_settings', { s: body });
+          return { ok: true };
+        }
+        const data = await invokeCmd('get_settings');
+        return { ok: true, data };
+      }
+      if (path === '/api/orphan_check') {
+        const data = await invokeCmd('check_orphan');
+        return { ok: true, data };
+      }
+      if (path === '/api/orphan_clean') {
+        const data = await invokeCmd('cleanup_orphan');
+        return { ok: true, data };
+      }
+      if (path === '/api/quit') {
+        // 不等待返回：这个命令执行后进程就没了
+        invokeCmd('quit_app', { stop: !!body.stop }).catch(() => {});
+        return { ok: true };
+      }
+
+      // ---- 延迟历史 ----
+      if (path.startsWith('/api/latency_history')) {
+        const q = new URLSearchParams(path.split('?')[1] || '');
+        const node = q.get('node') || '';
+        const minutes = parseInt(q.get('minutes'), 10) || 1440;
+        const data = await invokeCmd('latency_history', { node, minutes });
+        return { ok: true, data };
+      }
+
+      // ---- 节点详情 ----
+      if (path.startsWith('/api/peer_detail')) {
+        const q = new URLSearchParams(path.split('?')[1] || '');
+        const id = q.get('id') || '';
+        const data = await invokeCmd('peer_detail', { id });
+        return { ok: true, data };
+      }
+
+      // ---- 程序日志 ----
+      if (path.startsWith('/api/app_log')) {
+        const m = path.match(/lines=(\d+)/);
+        const data = await invokeCmd('tail_app_log', { lines: m ? parseInt(m[1], 10) : 400 });
+        return { ok: true, data };
+      }
+
+      // ---- 开机自启 ----
+      if (path === '/api/autostart') {
+        const message = await invokeCmd('set_autostart', { enable: !!body.enable });
+        return { ok: true, message };
+      }
+
+      // ---- 打开目录 ----
+      if (path === '/api/open_dir') {
+        const message = await invokeCmd('open_dir');
+        return { ok: true, message };
+      }
+
       throw new Error('未知接口: ' + path);
     } catch (e) {
       // Rust 返回 Err(String) 时，此处拿到的是字符串
@@ -859,161 +918,176 @@ function initPeerTable() {
   });
 }
 
-/* ---------------- 主题 ---------------- */
-
-/* ---------------- 主题 ----------------
+/* ---------------- 应用设置与退出确认 ----------------
  *
- * 5 套固定配色 + 1 个「跟随系统」。
+ * 背景：core 用 DETACHED_PROCESS 启动，与面板完全脱离。
+ * 好处是面板崩溃不影响组网，代价是「关面板」不会停核心。
  *
- * 为什么不做自由配色（色轮/自定义）：
- *   这个界面有大量语义色（延迟绿/黄/橙/红、告警橙、状态绿）。
- *   一旦允许用户自定义主色，很容易选出与语义色撞车的主色，
- *   用户就分不清「这是主题色还是告警色」。所以只提供
- *   经过调校、语义色仍然可辨的几套预设。
- * ------------------------------------------ */
+ * 用户遇到的实际问题：
+ *   面板被强杀后 core 成了孤儿，一直占着 easytier-core.exe
+ *   和 wintun.dll，覆盖升级时报「文件使用中」。
+ *
+ * 解决分两层：
+ *   1. 设置开关：让用户能选「关面板就停核心」
+ *   2. 启动清理：无论上次怎么退出的，下次启动都会清掉孤儿
+ * ---------------------------------------------- */
 
-const THEMES = [
-  { id: 'dark',     name: '深色',     dark: true,  bg: '#0f1319', accent: '#3b82f6' },
-  { id: 'light',    name: '浅色',     dark: false, bg: '#f5f7fa', accent: '#2563eb' },
-  { id: 'midnight', name: '午夜蓝',   dark: true,  bg: '#0b1020', accent: '#6366f1' },
-  { id: 'sand',     name: '暖沙',     dark: false, bg: '#f7f3ec', accent: '#b45309' },
-  { id: 'forest',   name: '墨绿',     dark: true,  bg: '#0c1512', accent: '#10b981' },
-  { id: 'auto',     name: '跟随系统', dark: null,  bg: 'auto',    accent: '#64748b' },
-];
+let APP_SETTINGS = {
+  stop_core_on_exit: false,
+  confirm_on_exit: true,
+  cleanup_orphan: true,
+  minimize_to_tray: true,
+  autostart: false,
+  autostart_core: false,
+  start_minimized: true,
+};
 
-const SUN_ICO = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
-const MOON_ICO = '<svg viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>';
-const AUTO_ICO = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v18" /><path d="M12 3a9 9 0 010 18" fill="currentColor" stroke="none" opacity=".55"/></svg>';
-const TICK_ICO = '<svg viewBox="0 0 10 10"><path d="M2 5l2.4 2.4L8 3"/></svg>';
+const SETTINGS_KEY = 'easytier.settings';
 
-let themeChoice = 'dark';   // 用户选择（可能是 auto）
-
-/** 系统是否偏好深色 */
-function systemPrefersDark() {
+/** 读取设置：优先后端，失败回退 localStorage */
+async function loadSettings() {
   try {
-    return window.matchMedia('(prefers-color-scheme: dark)').matches;
-  } catch (_) {
-    return true;
-  }
-}
-
-/** 把「用户选择」解析成实际生效的主题 id */
-function resolveTheme(choice) {
-  if (choice !== 'auto') return choice;
-  return systemPrefersDark() ? 'dark' : 'light';
-}
-
-/** 应用主题（choice 是用户选择，含 auto） */
-function applyTheme(choice) {
-  themeChoice = choice;
-  const actual = resolveTheme(choice);
-
-  document.documentElement.dataset.theme = actual;
-  // 告诉浏览器这是深色还是浅色，影响原生控件与滚动条
-  document.documentElement.style.colorScheme =
-    (THEMES.find(t => t.id === actual) || {}).dark ? 'dark' : 'light';
-
-  // 按钮图标：跟随实际生效主题，auto 时显示自动图标
-  const ico = $('themeIco');
-  if (ico) {
-    if (choice === 'auto') ico.innerHTML = AUTO_ICO;
-    else ico.innerHTML = actual === 'light' || actual === 'sand' ? SUN_ICO : MOON_ICO;
-  }
-
-  const btn = $('btnTheme');
-  if (btn) {
-    const cur = THEMES.find(t => t.id === choice) || { name: '深色' };
-    btn.title = '主题：' + cur.name;
-  }
-}
-
-function saveTheme(choice) {
-  try { localStorage.setItem(THEME_KEY, choice); } catch (_) {}
-}
-
-/** 渲染主题列表（含配色小样） */
-function renderThemeList() {
-  const box = $('themeList');
-  if (!box) return;
-
-  box.innerHTML = THEMES.map(t => {
-    let preview;
-    if (t.id === 'auto') {
-      // 自动：左深右浅的斜分块
-      preview = `<span class="sw-preview" style="background:linear-gradient(100deg,#0f1319 0 50%,#f5f7fa 50% 100%)"></span>`;
-    } else {
-      preview = `<span class="sw-preview">
-        <i style="background:${t.bg}"></i>
-        <i style="background:${t.accent}"></i>
-      </span>`;
+    const j = await api('/api/settings');
+    if (j.ok && j.data) {
+      APP_SETTINGS = { ...APP_SETTINGS, ...j.data };
+      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(APP_SETTINGS)); } catch (_) {}
+      return APP_SETTINGS;
     }
-    return `<div class="theme-item ${themeChoice === t.id ? 'on' : ''}" data-theme-id="${t.id}">
-      ${preview}
-      <span class="tn">${t.name}</span>
-      <span class="tick">${TICK_ICO}</span>
-    </div>`;
-  }).join('');
+  } catch (_) { /* 回退 */ }
+
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) APP_SETTINGS = { ...APP_SETTINGS, ...JSON.parse(raw) };
+  } catch (_) {}
+  return APP_SETTINGS;
 }
 
-function initTheme() {
-  let saved = 'dark';
+/** 保存设置：写后端 + 本地缓存 */
+async function saveAppSettings(patch) {
+  Object.assign(APP_SETTINGS, patch);
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(APP_SETTINGS)); } catch (_) {}
   try {
-    const v = localStorage.getItem(THEME_KEY);
-    if (v && THEMES.some(t => t.id === v)) saved = v;
-    else if (v === 'light' || v === 'dark') saved = v;
-  } catch (_) {}
-
-  applyTheme(saved);
-  renderThemeList();
-
-  const btn = $('btnTheme');
-  const panel = $('themePanel');
-  if (!btn || !panel) return;
-
-  const setOpen = (on) => {
-    panel.classList.toggle('open', on);
-    btn.classList.toggle('on', on);
-    if (on) renderThemeList();
-  };
-
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    setOpen(!panel.classList.contains('open'));
-  });
-
-  // 选择主题
-  panel.addEventListener('click', (e) => {
-    const item = e.target.closest('[data-theme-id]');
-    if (!item) return;
-    const id = item.dataset.themeId;
-    applyTheme(id);
-    saveTheme(id);
-    renderThemeList();
-    setOpen(false);
-  });
-
-  // 点外部 / Esc 关闭
-  document.addEventListener('click', (e) => {
-    if (!panel.classList.contains('open')) return;
-    if (panel.contains(e.target) || btn.contains(e.target)) return;
-    setOpen(false);
-  });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && panel.classList.contains('open')) setOpen(false);
-  });
-
-  // 选「跟随系统」时，系统主题变化要实时生效
-  try {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const onChange = () => {
-      if (themeChoice === 'auto') applyTheme('auto');
-    };
-    if (mq.addEventListener) mq.addEventListener('change', onChange);
-    else if (mq.addListener) mq.addListener(onChange);
-  } catch (_) {}
+    await api('/api/settings', { method: 'POST', body: JSON.stringify(APP_SETTINGS) });
+  } catch (e) {
+    toast('设置保存失败: ' + e.message, 'err');
+  }
 }
 
-/* ---------------- 渲染：子网代理 ---------------- */
+/* ---------- 退出确认弹窗 ---------- */
+
+let exitChoice = null;
+
+function openExitConfirm() {
+  const m = $('exitModal');
+  if (!m) return;
+  exitChoice = null;
+
+  // 清空选中态
+  m.querySelectorAll('.confirm-opt').forEach(el => el.classList.remove('on'));
+  const rem = $('chkExitRemember');
+  if (rem) rem.checked = false;
+
+  // 如果检测到孤儿核心，顺便提示
+  const tip = $('exitOrphanTip');
+  if (tip) {
+    api('/api/orphan_check').then(j => {
+      if (j.ok && j.data && (j.data.orphans || []).length) {
+        tip.textContent = `注意：检测到 ${j.data.orphans.length} 个残留的核心进程（父进程已退出），它们会继续占用文件。建议先停止核心。`;
+        tip.style.display = '';
+      } else {
+        tip.style.display = 'none';
+      }
+    }).catch(() => { tip.style.display = 'none'; });
+  }
+
+  m.classList.add('open');
+}
+
+function closeExitConfirm() {
+  const m = $('exitModal');
+  if (m) m.classList.remove('open');
+  exitChoice = null;
+}
+
+async function doExit(stop) {
+  closeExitConfirm();
+  try {
+    await api('/api/quit', { method: 'POST', body: JSON.stringify({ stop: !!stop }) });
+  } catch (_) {
+    // 进程已退出，请求会中断，属正常
+  }
+}
+
+function initExitConfirm() {
+  const m = $('exitModal');
+  if (!m) return;
+
+  // 选项点击
+  m.querySelectorAll('.confirm-opt').forEach(el => {
+    el.addEventListener('click', () => {
+      m.querySelectorAll('.confirm-opt').forEach(x => x.classList.remove('on'));
+      el.classList.add('on');
+      exitChoice = el.dataset.act;
+
+      // 记住选择 → 勾选后立刻落盘对应设置
+      const rem = $('chkExitRemember');
+      if (rem && rem.checked) {
+        saveAppSettings({
+          confirm_on_exit: false,
+          stop_core_on_exit: exitChoice === 'stop',
+        });
+      }
+      // 选完直接执行（少一次点击）
+      setTimeout(() => doExit(exitChoice === 'stop'), 120);
+    });
+  });
+
+  const cancel = $('btnExitCancel');
+  if (cancel) cancel.addEventListener('click', closeExitConfirm);
+
+  // 点遮罩关闭
+  m.addEventListener('click', e => {
+    if (e.target === m) closeExitConfirm();
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && m.classList.contains('open')) closeExitConfirm();
+  });
+}
+
+/* ---------- 监听后端发来的退出询问 ---------- */
+
+async function listenExitRequest() {
+  if (!IS_TAURI) return;
+  try {
+    const { listen } = window.__TAURI_INTERNALS__;
+    if (!listen) return;
+    await listen('ask-exit', () => {
+      openExitConfirm();
+    });
+  } catch (_) {
+    // 旧版 Tauri 或不支持时静默降级
+  }
+}
+
+/* ---------- 孤儿核心清理（手动触发）---------- */
+
+async function runOrphanCleanup(silent) {
+  try {
+    const j = await api('/api/orphan_clean');
+    if (!j.ok) throw new Error('清理失败');
+    const n = (j.data.killed || []).length;
+    if (n > 0) {
+      toast(`已清理 ${n} 个残留核心进程`, 'ok');
+    } else if (!silent) {
+      toast('没有发现残留进程');
+    }
+    return n;
+  } catch (e) {
+    if (!silent) toast('清理失败: ' + e.message, 'err');
+    return 0;
+  }
+}
 
 function renderProxy(d) {
   const box = $('proxyBox');
@@ -1234,11 +1308,1893 @@ function renderRoutes(d) {
 
 /* ---------------- 总渲染 ---------------- */
 
+/* ============================================================
+ * 模块管理（S3 需求4）
+ * 页面模块的显隐 / 排序 / 改名
+ * ============================================================ */
+
+const MODULES = [
+  { id: 'node',     def: '本节点',       on: true  },
+  { id: 'peers',    def: '对等节点',     on: true  },
+  { id: 'topo',     def: '网络拓扑',     on: true  },
+  { id: 'proxy',    def: '子网代理',     on: true  },
+  { id: 'routes',   def: '路由表',       on: false },
+  { id: 'forwards', def: '端口转发',     on: true  },
+  { id: 'active',   def: '活跃转发连接', on: true  },
+];
+
+const MOD_KEY = 'easytier.modules';
+let modCfg = [];
+
+function loadModules() {
+  const base = MODULES.map(m => ({ ...m, custom: '' }));
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(MOD_KEY) || 'null'); } catch (_) {}
+  if (!Array.isArray(saved) || !saved.length) { modCfg = base; return; }
+
+  const byId = {};
+  base.forEach(m => { byId[m.id] = m; });
+  const out = [];
+  saved.forEach(it => {
+    if (!it || !it.id) return;
+    const def = byId[it.id];
+    if (!def) return;
+    out.push({ ...def, on: it.on !== false, custom: it.custom || '' });
+    delete byId[it.id];
+  });
+  // 新增的模块（老配置里没有）追加到末尾
+  Object.values(byId).forEach(m => out.push(m));
+  modCfg = out;
+}
+
+function saveModules() {
+  try {
+    localStorage.setItem(MOD_KEY, JSON.stringify(
+      modCfg.map(m => ({ id: m.id, on: m.on, custom: m.custom || '' }))
+    ));
+  } catch (_) {}
+}
+
+/** 把配置应用到页面：改名 + 显隐 + 重排（不重建 DOM） */
+function applyModules() {
+  const container = $('moduleContainer');
+  if (!container) return;
+  const cards = {};
+  container.querySelectorAll('[data-mod]').forEach(c => { cards[c.dataset.mod] = c; });
+
+  modCfg.forEach(m => {
+    const card = cards[m.id];
+    if (!card) return;
+    const h2 = card.querySelector('.card-head h2');
+    if (h2) {
+      const nm = (m.custom && m.custom.trim()) || m.def;
+      if (h2.textContent !== nm) h2.textContent = nm;
+    }
+    card.classList.toggle('hide', !m.on);
+    // 用 appendChild 移动节点而非重建，保留表格滚动位置与 sparkline
+    container.appendChild(card);
+  });
+
+  // 拓扑图在显隐变化后需要重算尺寸
+  if (cards.topo && !cards.topo.classList.contains('hide')) {
+    requestAnimationFrame(() => renderTopo());
+  }
+}
+
+/* ---------------- 页面设置列表 UI ---------------- */
+
+let modDragFrom = null;
+
+function renderModList() {
+  const box = $('modList');
+  if (!box) return;
+
+  box.innerHTML = modCfg.map((m, i) => `
+    <div class="mod-item ${m.on ? 'on' : 'off'}" data-i="${i}" draggable="true">
+      <span class="grip">⣿</span>
+      <span class="mod-cb" data-tog="${i}">
+        <svg viewBox="0 0 10 10"><path d="M2 5l2.4 2.4L8 3"/></svg>
+      </span>
+      <span class="mod-name">${esc(m.def)}</span>
+      <input class="mod-input" data-name="${i}" value="${esc(m.custom)}"
+             placeholder="${esc(m.def)}" maxlength="16">
+      <button class="mod-reset" data-reset="${i}" title="恢复默认名称">
+        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 11-3-6.7"/><path d="M21 3v6h-6"/></svg>
+      </button>
+    </div>`).join('');
+
+  // 勾选
+  box.querySelectorAll('[data-tog]').forEach(el => {
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      const i = +el.dataset.tog;
+      // 至少保留一个可见
+      if (modCfg[i].on && modCfg.filter(m => m.on).length === 1) {
+        toast('至少保留一个模块可见', 'err');
+        return;
+      }
+      modCfg[i].on = !modCfg[i].on;
+      saveModules();
+      renderModList();
+      applyModules();
+    });
+  });
+
+  // 重置名称
+  box.querySelectorAll('[data-reset]').forEach(el => {
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      modCfg[+el.dataset.reset].custom = '';
+      saveModules();
+      renderModList();
+      applyModules();
+    });
+  });
+
+  // 改名（输入即生效）
+  box.querySelectorAll('[data-name]').forEach(el => {
+    el.addEventListener('input', () => {
+      modCfg[+el.dataset.name].custom = el.value.trim();
+      saveModules();
+      applyModules();
+    });
+  });
+
+  // 拖拽排序
+  box.querySelectorAll('.mod-item').forEach(el => {
+    el.addEventListener('dragstart', e => {
+      modDragFrom = +el.dataset.i;
+      el.classList.add('drag');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', String(modDragFrom)); } catch (_) {}
+    });
+    el.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    });
+    el.addEventListener('drop', e => {
+      e.preventDefault();
+      const to = +el.dataset.i;
+      if (modDragFrom === null || modDragFrom === to) return;
+      const [m] = modCfg.splice(modDragFrom, 1);
+      modCfg.splice(to, 0, m);
+      modDragFrom = null;
+      saveModules();
+      renderModList();
+      applyModules();
+    });
+    el.addEventListener('dragend', () => {
+      modDragFrom = null;
+      el.classList.remove('drag');
+    });
+  });
+}
+
+/* ============================================================
+ * 网络拓扑图（S5 需求）
+ *
+ * 数据源：get_status 里的 peers（含 kind: local/p2p/relay）
+ * 全互联关系由 peer-center 提供，这里降级为「所有非本机节点互连」
+ * 的近似（真实项目里应从 peer-center 的 direct_peers 取）。
+ * ============================================================ */
+
+let topoView = 'star';
+let topoLayout = 'circle';
+let topoManual = {};     // 拖动后的坐标覆盖
+let topoPeers = [];
+
+/** 布局计算：返回 {idx: {x,y}} */
+function computeTopoPos(W, H, peers) {
+  const pos = {};
+  const cx = W / 2, cy = H / 2;
+  pos[0] = topoManual[0] || { x: cx, y: cy };
+
+  const others = peers.map((p, i) => ({ p, i })).filter(o => o.p.kind !== 'local');
+  if (!others.length) return pos;
+
+  if (topoLayout === 'radial') {
+    // 分层：直连在内环，中转在外环
+    const inner = others.filter(o => o.p.kind === 'p2p')
+      .sort((a, b) => (parseFloat(a.p.lat_ms) || 99) - (parseFloat(b.p.lat_ms) || 99));
+    const outer = others.filter(o => o.p.kind !== 'p2p');
+    placeRing(inner, Math.min(W, H) * 0.30, cx, cy, -Math.PI / 2, pos);
+    placeRing(outer, Math.min(W, H) * 0.44, cx, cy, -Math.PI / 2 + 0.4, pos);
+  } else {
+    // 平铺环形
+    placeRing(others, Math.min(W, H) * 0.37, cx, cy, -Math.PI / 2, pos);
+  }
+
+  Object.keys(topoManual).forEach(k => { pos[k] = topoManual[k]; });
+  return pos;
+}
+
+function placeRing(items, R, cx, cy, start, pos) {
+  const n = items.length;
+  if (!n) return;
+  if (n === 1) {
+    pos[items[0].i] = topoManual[items[0].i] || { x: cx, y: cy - R };
+    return;
+  }
+  items.forEach((o, k) => {
+    const ang = start + (k / n) * Math.PI * 2;
+    pos[o.i] = topoManual[o.i] || {
+      x: cx + Math.cos(ang) * R,
+      y: cy + Math.sin(ang) * R * 0.94,
+    };
+  });
+}
+
+function topoLatColor(v) {
+  if (isNaN(v)) return 'var(--txt-mute)';
+  if (v < 10) return 'var(--green)';
+  if (v < 50) return 'var(--txt)';
+  if (v < 150) return 'var(--orange)';
+  return 'var(--red)';
+}
+
+function topoEdgeWidth(v) {
+  if (isNaN(v)) return 1.4;
+  if (v < 10) return 2.8;
+  if (v < 50) return 2;
+  return 1.3;
+}
+
+/** 主渲染 */
+function renderTopo() {
+  const svg = $('topoSvg');
+  const canvas = $('topoCanvas');
+  if (!svg || !canvas) return;
+
+  const peers = topoPeers;
+  const empty = $('topoEmpty');
+
+  if (!peers.length) {
+    svg.innerHTML = '';
+    if (empty) empty.style.display = '';
+    $('topoNodeCount').textContent = '0 节点';
+    $('topoEdgeCount').textContent = '0 连接';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  const W = canvas.clientWidth || 800;
+  const H = canvas.clientHeight || 400;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const pos = computeTopoPos(W, H, peers);
+
+  // 连线
+  let edges = [];
+  if (topoView === 'star') {
+    peers.forEach((p, i) => { if (i !== 0) edges.push({ a: 0, b: i }); });
+  } else {
+    for (let i = 0; i < peers.length; i++)
+      for (let j = i + 1; j < peers.length; j++)
+        edges.push({ a: i, b: j });
+  }
+
+  const edgeHtml = edges.map((e, k) => {
+    const A = pos[e.a], B = pos[e.b];
+    if (!A || !B) return '';
+    const pa = peers[e.a], pb = peers[e.b];
+    const lat = parseFloat(pa.lat_ms) || parseFloat(pb.lat_ms);
+    const isRelay = pa.kind === 'relay' || pb.kind === 'relay';
+    const col = isRelay ? 'var(--orange)' : 'var(--green)';
+    const w = topoView === 'mesh' ? Math.max(1, topoEdgeWidth(lat) * 0.6) : topoEdgeWidth(lat);
+    const op = topoView === 'mesh' ? 0.18 : 0.7;
+    const dx = B.x - A.x, dy = B.y - A.y;
+    const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+    const cqx = mx - dy * 0.045, cqy = my + dx * 0.045;
+    return `<path class="topo-edge" data-e="${k}" data-a="${e.a}" data-b="${e.b}"
+      d="M${A.x.toFixed(1)} ${A.y.toFixed(1)} Q${cqx.toFixed(1)} ${cqy.toFixed(1)} ${B.x.toFixed(1)} ${B.y.toFixed(1)}"
+      fill="none" stroke="${col}" stroke-width="${w}"
+      ${isRelay ? 'stroke-dasharray="5 4"' : ''} opacity="${op}" stroke-linecap="round"/>`;
+  }).join('');
+
+  // 中心装饰环
+  const c0 = pos[0] || { x: W / 2, y: H / 2 };
+  const ringHtml = `
+    <circle class="topo-ring pulse" cx="${c0.x}" cy="${c0.y}" r="26"/>
+    <circle class="topo-ring" cx="${c0.x}" cy="${c0.y}" r="44" stroke-dasharray="2 6" opacity=".25"/>`;
+
+  // 节点
+  const showLat = $('cbTopoLat') && $('cbTopoLat').checked;
+  const showTr = $('cbTopoTraffic') && $('cbTopoTraffic').checked;
+  const myVer = (peers.find(p => p.kind === 'local') || {}).version || '';
+
+  const nodeHtml = peers.map((p, i) => {
+    const P = pos[i];
+    if (!P) return '';
+    const isLocal = p.kind === 'local';
+    const lat = parseFloat(p.lat_ms);
+    const loss = parseFloat(p.loss_rate);
+    const abn = !isLocal && (
+      (!isNaN(loss) && loss >= 5) ||
+      (!isNaN(lat) && lat >= 150) ||
+      (myVer && p.version && p.version !== myVer)
+    );
+    const r = isLocal ? 23 : 16;
+    const col = isLocal ? 'var(--brand)' : (abn ? 'var(--orange)' : 'var(--green)');
+    const nm = String(p.hostname || '').length > 11
+      ? String(p.hostname).slice(0, 10) + '…'
+      : (p.hostname || '—');
+
+    let line2 = '', line3 = '';
+    if (showLat && !isNaN(lat)) {
+      line2 = `<text class="topo-lat" x="0" y="${r + 14}" text-anchor="middle"
+        fill="${topoLatColor(lat)}" font-size="9.5"
+        font-family="Consolas,monospace" font-weight="600">${lat.toFixed(2)}ms</text>`;
+    } else if (isLocal) {
+      line2 = `<text class="topo-lat" x="0" y="${r + 14}" text-anchor="middle"
+        fill="var(--brand)" font-size="9" font-weight="600">本机</text>`;
+    }
+    if (showTr && !isLocal && p.rx) {
+      line3 = `<text class="topo-lat" x="0" y="${r + 25}" text-anchor="middle"
+        fill="var(--txt-mute)" font-size="8"
+        font-family="Consolas,monospace">↧${esc(p.rx)}</text>`;
+    }
+
+    return `<g class="topo-node" data-n="${i}" transform="translate(${P.x.toFixed(1)},${P.y.toFixed(1)})">
+      <circle class="topo-halo" r="${r}" fill="${col}" fill-opacity=".14"
+        stroke="${col}" stroke-width="${isLocal ? 2.4 : 1.8}"/>
+      <circle r="${isLocal ? 7 : 5}" fill="${col}"/>
+      ${abn ? `<circle r="${r + 4}" fill="none" stroke="var(--orange)" stroke-width="1"
+        stroke-dasharray="3 3" opacity=".7"/>` : ''}
+      <text class="topo-lbl" x="0" y="${-r - 7}" text-anchor="middle"
+        fill="var(--txt)" font-size="10.5" font-weight="650">${esc(nm)}</text>
+      ${line2}${line3}
+    </g>`;
+  }).join('');
+
+  svg.innerHTML = ringHtml + edgeHtml + nodeHtml;
+
+  $('topoNodeCount').textContent = peers.length + ' 节点';
+  $('topoEdgeCount').textContent = edges.length + ' 连接';
+
+  bindTopoEvents(svg, pos, edges);
+}
+
+/** 事件绑定 */
+function bindTopoEvents(svg, pos, edges) {
+  const tip = $('topoTip');
+  const canvas = $('topoCanvas');
+  if (!canvas) return;
+
+  const showTip = (html, clientX, clientY) => {
+    if (!tip) return;
+    const cr = canvas.getBoundingClientRect();
+    tip.innerHTML = html;
+    tip.classList.add('show');
+    let x = clientX - cr.left;
+    let y = clientY - cr.top - 8;
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    x = Math.max(6, Math.min(cr.width - tw - 6, x - tw / 2));
+    y = Math.max(6, y - th);
+    tip.style.left = x + 'px';
+    tip.style.top = y + 'px';
+  };
+  const hideTip = () => tip && tip.classList.remove('show');
+
+  svg.querySelectorAll('.topo-node').forEach(g => {
+    const idx = +g.dataset.n;
+
+    g.addEventListener('mouseenter', () => {
+      /* 高亮规则：
+         亮 = 当前节点 + 与它直接相连的节点
+         暗 = 其余一切
+         连线必须【一端是当前节点】才亮——这是关键，
+         用「两端都在邻居集合里」判断的话，全互联模式下全部亮，等于没高亮。 */
+      const litNodes = new Set([idx]);
+      edges.forEach(ed => {
+        if (ed.a === idx) litNodes.add(ed.b);
+        if (ed.b === idx) litNodes.add(ed.a);
+      });
+
+      svg.querySelectorAll('.topo-edge').forEach(el => {
+        const a = +el.dataset.a, b = +el.dataset.b;
+        const keep = (a === idx || b === idx);
+        el.classList.toggle('dim', !keep);
+        if (keep) {
+          el.dataset.ow = el.getAttribute('stroke-width');
+          el.setAttribute('stroke-width', (parseFloat(el.dataset.ow) * 1.6).toFixed(2));
+          el.setAttribute('opacity', '1');
+        }
+      });
+      svg.querySelectorAll('.topo-node').forEach(o => {
+        o.classList.toggle('dim', !litNodes.has(+o.dataset.n));
+        const halo = o.querySelector('.topo-halo');
+        if (halo) halo.setAttribute('stroke-width', +o.dataset.n === idx ? '3.6' : '1.8');
+      });
+    });
+
+    g.addEventListener('mouseleave', () => {
+      svg.querySelectorAll('.topo-edge').forEach(el => {
+        el.classList.remove('dim');
+        if (el.dataset.ow) el.setAttribute('stroke-width', el.dataset.ow);
+      });
+      svg.querySelectorAll('.topo-node').forEach(o => {
+        o.classList.remove('dim');
+        const halo = o.querySelector('.topo-halo');
+        if (halo) halo.setAttribute('stroke-width', +o.dataset.n === 0 ? '2.4' : '1.8');
+      });
+      hideTip();
+    });
+
+    // tooltip
+    g.addEventListener('mousemove', e => {
+      const p = topoPeers[idx];
+      if (!p) return;
+      const lat = parseFloat(p.lat_ms);
+      const loss = parseFloat(p.loss_rate);
+      const kindTxt = p.kind === 'local' ? '本机' : (p.kind === 'relay' ? '经中转' : '直连');
+      let rows = '';
+      if (p.ipv4) rows += `<div class="r">IP<b class="mono">${esc(p.ipv4)}</b></div>`;
+      if (!isNaN(lat)) rows += `<div class="r">延迟<b style="color:${topoLatColor(lat)}">${lat.toFixed(2)} ms</b></div>`;
+      if (!isNaN(loss)) rows += `<div class="r">丢包<b>${loss.toFixed(1)}%</b></div>`;
+      if (p.version) rows += `<div class="r">版本<b>${esc(String(p.version).split('-')[0])}</b></div>`;
+      showTip(`<div class="h">${esc(p.hostname || '—')}<span class="k">${kindTxt}</span></div>${rows}`,
+        e.clientX, e.clientY);
+    });
+    g.addEventListener('mouseleave', hideTip);
+
+    /* 拖动：只移动当前节点 + 重算它的边，不重建整个 SVG
+       （重建会销毁 g 元素，setPointerCapture 随之失效，拖一下就断） */
+    let drag = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0, scale = 1;
+
+    g.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      drag = true; moved = false;
+      sx = e.clientX; sy = e.clientY;
+      const P = pos[idx];
+      ox = P.x; oy = P.y;
+      // 屏幕像素 → SVG 坐标的换算，否则拖动会「飘」
+      const rect = svg.getBoundingClientRect();
+      const vb = svg.getAttribute('viewBox').split(/\s+/);
+      scale = (parseFloat(vb[2]) || rect.width) / rect.width;
+      try { g.setPointerCapture(e.pointerId); } catch (_) {}
+      svg.classList.add('dragging');
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    g.addEventListener('pointermove', e => {
+      if (!drag) return;
+      const dx = (e.clientX - sx) * scale;
+      const dy = (e.clientY - sy) * scale;
+      if (!moved && Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
+      moved = true;
+
+      const nx = ox + dx, ny = oy + dy;
+      pos[idx] = { x: nx, y: ny };
+      topoManual[idx] = { x: nx, y: ny };
+
+      g.setAttribute('transform', `translate(${nx.toFixed(1)},${ny.toFixed(1)})`);
+
+      // 只更新与它相连的边
+      svg.querySelectorAll('.topo-edge').forEach(el => {
+        const a = +el.dataset.a, b = +el.dataset.b;
+        if (a !== idx && b !== idx) return;
+        const A = pos[a], B = pos[b];
+        if (!A || !B) return;
+        const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+        const ddx = B.x - A.x, ddy = B.y - A.y;
+        const cqx = mx - ddy * 0.045, cqy = my + ddx * 0.045;
+        el.setAttribute('d',
+          `M${A.x.toFixed(1)} ${A.y.toFixed(1)} Q${cqx.toFixed(1)} ${cqy.toFixed(1)} ${B.x.toFixed(1)} ${B.y.toFixed(1)}`);
+      });
+
+      // 中心环跟随
+      if (idx === 0) {
+        svg.querySelectorAll('.topo-ring').forEach(c => {
+          c.setAttribute('cx', nx.toFixed(1));
+          c.setAttribute('cy', ny.toFixed(1));
+        });
+      }
+    });
+
+    const endDrag = e => {
+      if (!drag) return;
+      drag = false;
+      svg.classList.remove('dragging');
+      try { g.releasePointerCapture(e.pointerId); } catch (_) {}
+    };
+    g.addEventListener('pointerup', endDrag);
+    g.addEventListener('pointercancel', endDrag);
+
+    g.addEventListener('click', () => {
+      if (moved) return;   // 拖动后不触发详情
+      openNodeDetail(idx);
+    });
+  });
+
+  // 连线 tooltip
+  svg.querySelectorAll('.topo-edge').forEach(el => {
+    el.addEventListener('mousemove', e => {
+      const a = topoPeers[+el.dataset.a], b = topoPeers[+el.dataset.b];
+      if (!a || !b) return;
+      const lat = parseFloat(a.lat_ms) || parseFloat(b.lat_ms);
+      const isRelay = a.kind === 'relay' || b.kind === 'relay';
+      showTip(`<div class="h">${esc(a.hostname || '—')} ↔ ${esc(b.hostname || '—')}</div>
+        <div class="r">类型<b>${isRelay ? '经中转' : '直连'}</b></div>
+        ${!isNaN(lat) ? `<div class="r">延迟<b>${lat.toFixed(2)} ms</b></div>` : ''}`,
+        e.clientX, e.clientY);
+    });
+    el.addEventListener('mouseleave', hideTip);
+  });
+}
+
+function initTopoControls() {
+  const viewSeg = $('topoViewSeg');
+  const layoutSeg = $('topoLayoutSeg');
+
+  if (viewSeg) {
+    viewSeg.querySelectorAll('button').forEach(b => {
+      b.addEventListener('click', () => {
+        viewSeg.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+        b.classList.add('on');
+        topoView = b.dataset.v;
+        renderTopo();
+      });
+    });
+  }
+
+  if (layoutSeg) {
+    layoutSeg.querySelectorAll('button').forEach(b => {
+      b.addEventListener('click', () => {
+        layoutSeg.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+        b.classList.add('on');
+        topoLayout = b.dataset.l;
+        topoManual = {};   // 切换布局时清掉手动位置
+        renderTopo();
+      });
+    });
+  }
+
+  ['cbTopoLat', 'cbTopoTraffic'].forEach(id => {
+    const el = $(id);
+    if (el) el.addEventListener('change', renderTopo);
+  });
+
+  const reset = $('btnTopoReset');
+  if (reset) {
+    reset.addEventListener('click', () => {
+      topoManual = {};
+      renderTopo();
+      toast('布局已重置');
+    });
+  }
+}
+
+/* ============================================================
+ * 配置表单化（S4 需求）
+ *
+ * 设计要点：
+ *   · 表单和 TOML 双向同步，但「原始配置」是唯一真相源
+ *   · 表单改动 → 重新生成 TOML → 写回 textarea
+ *   · TOML 未知字段必须原样保留，否则用户手写的 ACL 会被吞掉
+ * ============================================================ */
+
+const CFG_META = {
+  basic: [
+    { group: '基本信息', fields: [
+      { key: 'instance_name', label: '实例名', type: 'text', mono: true },
+      { key: 'hostname',      label: '主机名', type: 'text' },
+      { key: 'ipv4',          label: '虚拟 IP', type: 'text', mono: true,
+        hint: '需同网段且不重复' },
+      { key: 'dhcp',          label: 'DHCP 自动分配', type: 'bool',
+        note: '开启后忽略虚拟 IP' },
+    ]},
+    { group: '监听与设备', fields: [
+      { key: 'listeners', label: '监听地址', type: 'list', mono: true,
+        placeholder: 'tcp://0.0.0.0:11010' },
+    ]},
+  ],
+  network: [
+    { group: '网络身份', required: true, fields: [
+      { key: 'network_identity.network_name',   label: '网络名称', type: 'text', mono: true },
+      { key: 'network_identity.network_secret', label: '网络密钥', type: 'secret', mono: true },
+    ]},
+    { group: '子网代理', fields: [
+      { key: 'proxy_network', label: '代理网段', type: 'cidrs', mono: true,
+        placeholder: '192.168.31.0/24' },
+    ]},
+    { group: '对等节点', fields: [
+      { key: 'peer', label: '种子地址', type: 'uris', mono: true,
+        placeholder: 'tcp://1.2.3.4:11010', note: '至少一个，改后需重启核心' },
+    ]},
+  ],
+};
+
+/* 高级配置：按官方 easytier-core --help 整理 */
+const CFG_ADV = [
+  { group: 'IPv6', folded: false, fields: [
+    { key: 'flags.enable_ipv6', label: '启用 IPv6', type: 'bool', def: true },
+    { key: 'ipv6', label: 'IPv6 地址', type: 'text', mono: true, placeholder: 'fd00::1/64' },
+    { key: 'flags.ipv6_public_addr_auto', label: '公网地址自动获取', type: 'bool' },
+  ]},
+  { group: '协议加速（KCP / QUIC）', folded: false, fields: [
+    { key: 'flags.enable_kcp_proxy',    label: 'KCP 代理', type: 'bool', hint: '弱网下提升 TCP 吞吐' },
+    { key: 'flags.disable_kcp_input',   label: '禁止他人用 KCP 连我', type: 'bool' },
+    { key: 'flags.enable_quic_proxy',   label: 'QUIC 代理', type: 'bool' },
+    { key: 'flags.disable_quic_input',  label: '禁止他人用 QUIC 连我', type: 'bool' },
+    { key: 'flags.default_protocol',    label: '默认协议', type: 'select',
+      options: ['tcp', 'udp', 'ws', 'wss', 'quic', 'wg'], def: 'tcp' },
+    { key: 'flags.compression',         label: '压缩算法', type: 'select',
+      options: ['none', 'zstd'], def: 'none' },
+  ]},
+  { group: 'P2P 与 NAT 穿透', folded: true, fields: [
+    { key: 'flags.disable_p2p',                label: '禁用自动 P2P', type: 'bool' },
+    { key: 'flags.p2p_only',                   label: '仅 P2P 通信', type: 'bool' },
+    { key: 'flags.lazy_p2p',                   label: '按需建立 P2P', type: 'bool' },
+    { key: 'flags.disable_udp_hole_punching',  label: '禁用 UDP 打洞', type: 'bool' },
+    { key: 'flags.disable_tcp_hole_punching',  label: '禁用 TCP 打洞', type: 'bool' },
+    { key: 'flags.disable_sym_hole_punching',  label: '禁用对称 NAT 打洞', type: 'bool' },
+    { key: 'flags.disable_upnp',               label: '禁用 UPnP', type: 'bool' },
+  ]},
+  { group: '路由与转发', folded: true, fields: [
+    { key: 'flags.latency_first',          label: '延迟优先', type: 'bool', hint: '默认走最短路径' },
+    { key: 'flags.enable_exit_node',       label: '允许作为出口节点', type: 'bool' },
+    { key: 'exit_nodes',                   label: '出口节点列表', type: 'list', mono: true },
+    { key: 'flags.manual_routes',          label: '手动路由', type: 'list', mono: true,
+      placeholder: '192.168.0.0/16' },
+    { key: 'flags.relay_network_whitelist', label: '中转白名单', type: 'text', mono: true },
+    { key: 'flags.relay_all_peer_rpc',     label: '转发所有 RPC', type: 'bool' },
+  ]},
+  { group: '白名单与访问控制', folded: true, fields: [
+    { key: 'flags.tcp_whitelist',          label: 'TCP 端口白名单', type: 'text', mono: true,
+      placeholder: '80,443,8000-9000' },
+    { key: 'flags.udp_whitelist',          label: 'UDP 端口白名单', type: 'text', mono: true,
+      placeholder: '53' },
+    { key: 'flags.private_mode',           label: '私有模式', type: 'bool' },
+    { key: 'flags.socks5',                 label: 'SOCKS5 端口', type: 'text', mono: true,
+      placeholder: '1080' },
+  ]},
+  { group: '其他', folded: true, fields: [
+    { key: 'flags.no_tun',           label: '不创建 TUN 设备', type: 'bool' },
+    { key: 'flags.use_smoltcp',      label: '使用 smoltcp 栈', type: 'bool' },
+    { key: 'flags.multi_thread',     label: '多线程运行时', type: 'bool' },
+    { key: 'flags.mtu',              label: 'MTU', type: 'text', mono: true,
+      hint: '加密默认 1360，非加密 1380' },
+    { key: 'flags.dev_name',         label: 'TUN 设备名', type: 'text', mono: true },
+    { key: 'flags.accept_dns',       label: '魔法 DNS', type: 'bool' },
+    { key: 'flags.encryption_algorithm', label: '加密算法', type: 'select',
+      options: ['', 'xor', 'chacha20', 'aes-gcm', 'aes-gcm-256'] },
+  ]},
+];
+
+const CFG_PF_TEMPLATES = [
+  { name: '远程桌面 RDP', bind: '0.0.0.0:13389', dst: '127.0.0.1:3389' },
+  { name: 'SSH',         bind: '0.0.0.0:10022', dst: '127.0.0.1:22'   },
+  { name: 'SMB 共享',    bind: '0.0.0.0:10445', dst: '127.0.0.1:445'  },
+  { name: 'HTTP',        bind: '0.0.0.0:10080', dst: '127.0.0.1:80'   },
+];
+
+/** 配置对象（从 TOML 解析而来） */
+let cfgObj = { flags: {}, network_identity: {}, peer: [], proxy_network: [], port_forward: [] };
+let cfgRawChanged = false;
+
+/* ---------------- 极简 TOML 解析 ----------------
+ * 不引入 toml 库（前端没必要多 30KB 依赖），
+ * 只处理本项目用到的子集：字符串/数字/布尔/数组/表/数组表。
+ * 不认识的字段原样保留在 _unknown 里，写回时不丢。 */
+
+function parseToml(text) {
+  const obj = {};
+  let cur = obj;
+  const lines = String(text || '').split(/\r?\n/);
+
+  lines.forEach(rawLine => {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) return;
+
+    // [[array.of.table]]
+    let m = line.match(/^\[\[([^\]]+)\]\]$/);
+    if (m) {
+      const key = m[1].trim();
+      if (!Array.isArray(obj[key])) obj[key] = [];
+      const item = {};
+      obj[key].push(item);
+      cur = item;
+      return;
+    }
+    // [table]
+    m = line.match(/^\[([^\]]+)\]$/);
+    if (m) {
+      const key = m[1].trim();
+      if (typeof obj[key] !== 'object' || Array.isArray(obj[key])) obj[key] = {};
+      cur = obj[key];
+      return;
+    }
+
+    // key = value
+    m = line.match(/^([A-Za-z0-9_.-]+)\s*=\s*(.+)$/);
+    if (!m) return;
+    const key = m[1];
+    let val = m[2].trim();
+
+    // 去行尾注释（但保留字符串内的 #）
+    val = stripInlineComment(val);
+
+    cur[key] = parseTomlValue(val);
+  });
+
+  return obj;
+}
+
+function stripInlineComment(v) {
+  let inStr = false, q = '';
+  for (let i = 0; i < v.length; i++) {
+    const c = v[i];
+    if (inStr) {
+      if (c === '\\') { i++; continue; }
+      if (c === q) inStr = false;
+    } else {
+      if (c === '"' || c === "'") { inStr = true; q = c; }
+      else if (c === '#') return v.slice(0, i).trim();
+    }
+  }
+  return v.trim();
+}
+
+function parseTomlValue(v) {
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  if (/^-?\d+$/.test(v)) return parseInt(v, 10);
+  if (/^-?\d*\.\d+$/.test(v)) return parseFloat(v);
+  // 数组
+  if (v.startsWith('[') && v.endsWith(']')) {
+    const inner = v.slice(1, -1).trim();
+    if (!inner) return [];
+    return splitTopLevel(inner).map(s => parseTomlValue(s.trim()));
+  }
+  // 字符串
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+    return v.slice(1, -1).replace(/\\"/g, '"').replace(/\\n/g, '\n');
+  }
+  return v;
+}
+
+function splitTopLevel(s) {
+  const out = [];
+  let cur = '', depth = 0, inStr = false, q = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      cur += c;
+      if (c === '\\') { cur += s[++i] || ''; continue; }
+      if (c === q) inStr = false;
+      continue;
+    }
+    if (c === '"' || c === "'") { inStr = true; q = c; cur += c; continue; }
+    if (c === '[' || c === '{') depth++;
+    if (c === ']' || c === '}') depth--;
+    if (c === ',' && depth === 0) { out.push(cur); cur = ''; continue; }
+    cur += c;
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+}
+
+/* ---------------- 生成 TOML ---------------- */
+
+function genToml(obj) {
+  const lines = [];
+  const scalarKeys = [];
+  const tableKeys = [];
+
+  Object.keys(obj).forEach(k => {
+    const v = obj[k];
+    if (v && typeof v === 'object' && !Array.isArray(v)) tableKeys.push(k);
+    else if (Array.isArray(v) && v.length && typeof v[0] === 'object') tableKeys.push(k);
+    else scalarKeys.push(k);
+  });
+
+  scalarKeys.forEach(k => {
+    lines.push(`${k} = ${tomlValue(obj[k])}`);
+  });
+
+  tableKeys.forEach(k => {
+    const v = obj[k];
+    if (Array.isArray(v)) {
+      v.forEach(item => {
+        lines.push('');
+        lines.push(`[[${k}]]`);
+        Object.keys(item).forEach(kk => lines.push(`${kk} = ${tomlValue(item[kk])}`));
+      });
+    } else {
+      // 标量表放前面，嵌套表放后面
+      const subTables = [];
+      lines.push('');
+      lines.push(`[${k}]`);
+      Object.keys(v).forEach(kk => {
+        if (v[kk] && typeof v[kk] === 'object' && !Array.isArray(v[kk])) subTables.push(kk);
+        else lines.push(`${kk} = ${tomlValue(v[kk])}`);
+      });
+      subTables.forEach(st => {
+        lines.push('');
+        lines.push(`[${k}.${st}]`);
+        Object.keys(v[st]).forEach(kkk => lines.push(`${kkk} = ${tomlValue(v[st][kkk])}`));
+      });
+    }
+  });
+
+  return lines.join('\n') + '\n';
+}
+
+function tomlValue(v) {
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (typeof v === 'number') return String(v);
+  if (Array.isArray(v)) return '[' + v.map(tomlValue).join(', ') + ']';
+  if (v === null || v === undefined) return '""';
+  return '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+}
+
+/* ---------------- 取值/设值 ---------------- */
+
+function getByPath(obj, path) {
+  const parts = path.split('.');
+  let cur = obj;
+  for (const p of parts) {
+    if (cur == null || typeof cur !== 'object') return undefined;
+    cur = cur[p];
+  }
+  return cur;
+}
+
+function setByPath(obj, path, val) {
+  const parts = path.split('.');
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const p = parts[i];
+    if (cur[p] == null || typeof cur[p] !== 'object') cur[p] = {};
+    cur = cur[p];
+  }
+  cur[parts[parts.length - 1]] = val;
+}
+
+/* ---------------- 渲染表单 ---------------- */
+
+function renderField(f, val) {
+  const id = 'f_' + f.key.replace(/\./g, '_');
+  const hint = f.hint ? `<span class="hint" title="${esc(f.hint)}">?</span>` : '';
+
+  if (f.type === 'bool') {
+    return `<div class="cfg-row">
+      <div class="lbl">${esc(f.label)}${hint}</div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <label class="switch"><input type="checkbox" id="${id}" data-cfg="${f.key}"
+          data-type="bool" ${val === true ? 'checked' : ''}><span class="track"></span></label>
+        ${f.note ? `<span class="small muted">${esc(f.note)}</span>` : ''}
+      </div>
+    </div>`;
+  }
+
+  if (f.type === 'select') {
+    const opts = (f.options || []).map(o =>
+      `<option value="${esc(o)}" ${String(val === undefined ? f.def : val) === o ? 'selected' : ''}>${esc(o || '(默认)')}</option>`
+    ).join('');
+    return `<div class="cfg-row">
+      <div class="lbl">${esc(f.label)}${hint}</div>
+      <select class="inp" id="${id}" data-cfg="${f.key}" data-type="select">${opts}</select>
+    </div>`;
+  }
+
+  if (f.type === 'secret') {
+    return `<div class="cfg-row">
+      <div class="lbl">${esc(f.label)}${hint}</div>
+      <div class="cfg-secret">
+        <input class="inp mono" type="password" id="${id}" data-cfg="${f.key}"
+          data-type="text" value="${esc(val == null ? '' : val)}">
+        <button class="eye" data-eye="${id}" title="显示/隐藏">
+          <svg viewBox="0 0 24 24"><path d="M1.5 12S5 5 12 5s10.5 7 10.5 7S19 19 12 19 1.5 12 1.5 12z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+    </div>`;
+  }
+
+  if (f.type === 'list' || f.type === 'cidrs' || f.type === 'uris') {
+    const arr = Array.isArray(val) ? val : [];
+    if (f.type === 'list') {
+      // 简单列表：每行一个输入框
+      const rows = (arr.length ? arr : ['']).map((v, i) => `
+        <div class="list-row">
+          <input class="inp ${f.mono ? 'mono' : ''}" data-cfg-list="${f.key}" data-idx="${i}"
+            value="${esc(v)}" placeholder="${esc(f.placeholder || '')}">
+          <button class="list-del" data-list-del="${f.key}" data-idx="${i}" title="删除">✕</button>
+        </div>`).join('');
+      return `<div class="cfg-row">
+        <div class="lbl">${esc(f.label)}${hint}</div>
+        <div class="list-box" data-list-box="${f.key}">
+          ${rows}
+          <button class="sm-btn" data-list-add="${f.key}">+ 添加</button>
+          ${f.note ? `<div class="small muted" style="margin-top:4px">${esc(f.note)}</div>` : ''}
+        </div>
+      </div>`;
+    }
+    // cidrs / uris：数组表（[[proxy_network]] / [[peer]]）
+    const subKey = f.type === 'cidrs' ? 'cidr' : 'uri';
+    const rows = (arr.length ? arr : [{}]).map((item, i) => `
+      <div class="list-row">
+        <input class="inp ${f.mono ? 'mono' : ''}" data-cfg-tbl="${f.key}" data-sub="${subKey}" data-idx="${i}"
+          value="${esc(item[subKey] || '')}" placeholder="${esc(f.placeholder || '')}">
+        <button class="list-del" data-tbl-del="${f.key}" data-idx="${i}" title="删除">✕</button>
+      </div>`).join('');
+    return `<div class="cfg-row">
+      <div class="lbl">${esc(f.label)}${hint}</div>
+      <div class="list-box">
+        ${rows}
+        <button class="sm-btn" data-tbl-add="${f.key}" data-sub="${subKey}" data-ph="${esc(f.placeholder || '')}">+ 添加</button>
+        ${f.note ? `<div class="small muted" style="margin-top:4px">${esc(f.note)}</div>` : ''}
+      </div>
+    </div>`;
+  }
+
+  // 默认 text
+  return `<div class="cfg-row">
+    <div class="lbl">${esc(f.label)}${hint}</div>
+    <input class="inp ${f.mono ? 'mono' : ''}" id="${id}" data-cfg="${f.key}" data-type="text"
+      value="${esc(val == null ? '' : val)}" placeholder="${esc(f.placeholder || '')}">
+  </div>`;
+}
+
+function renderGroup(g) {
+  const body = g.fields.map(f => renderField(f, getByPath(cfgObj, f.key))).join('');
+  const req = g.required ? '<span class="req">必填</span>' : '';
+  return `<div class="cfg-group ${g.folded ? 'folded' : ''}">
+    <h5>${esc(g.group)} ${req} <span class="arrow">▾</span></h5>
+    <div class="cfg-body">${body}</div>
+  </div>`;
+}
+
+function renderConfigForm() {
+  if ($('cfgBasic')) {
+    $('cfgBasic').innerHTML = CFG_META.basic.map(renderGroup).join('');
+  }
+  if ($('cfgNetwork')) {
+    $('cfgNetwork').innerHTML = CFG_META.network.map(renderGroup).join('') +
+      `<div class="note warn">
+        <svg viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>
+        <div>对等节点属于部署期配置，改后<b>必须重启核心</b>才生效。</div>
+      </div>`;
+  }
+  if ($('cfgAdv')) {
+    $('cfgAdv').innerHTML = CFG_ADV.map(renderGroup).join('');
+  }
+  if ($('cfgPf')) {
+    renderPortForwardPane();
+  }
+  bindConfigEvents();
+}
+
+/** 端口转发卡片列表 */
+function renderPortForwardPane() {
+  const box = $('cfgPf');
+  if (!box) return;
+  const list = Array.isArray(cfgObj.port_forward) ? cfgObj.port_forward : [];
+
+  const cards = list.length
+    ? list.map((it, i) => `
+      <div class="pf-card" data-pf="${i}">
+        <div class="pf-flow">
+          <input class="inp mono pf-bind" data-pf-bind="${i}" value="${esc(it.bind_addr || '')}"
+            placeholder="0.0.0.0:13389">
+          <span class="pf-arrow">→</span>
+          <input class="inp mono pf-dst" data-pf-dst="${i}" value="${esc(it.dst_addr || '')}"
+            placeholder="127.0.0.1:3389">
+          <button class="sm-btn danger" data-pf-del="${i}">删除</button>
+        </div>
+        <div class="pf-meta"><span>绑定地址 → 目标地址</span></div>
+      </div>`).join('')
+    : '<div class="empty-hint">未配置端口转发</div>';
+
+  const tpls = CFG_PF_TEMPLATES.map((t, i) =>
+    `<button class="tpl" data-pf-tpl="${i}">${esc(t.name)}</button>`).join('');
+
+  box.innerHTML = `
+    <div class="note">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+      <div>把虚拟网某个端口转发到本机服务。转发到 <span class="mono">127.0.0.1</span> 只对本机生效。</div>
+    </div>
+    <div class="pf-list">${cards}</div>
+    <div style="margin-top:10px">
+      <button class="sm-btn" id="btnPfAdd">+ 添加转发规则</button>
+    </div>
+    <div class="tpl-row">
+      <span class="small muted" style="align-self:center;margin-right:2px">快速模板：</span>
+      ${tpls}
+    </div>`;
+
+  bindPortForwardEvents();
+}
+
+function bindPortForwardEvents() {
+  const box = $('cfgPf');
+  if (!box) return;
+
+  const add = $('btnPfAdd');
+  if (add) {
+    add.addEventListener('click', () => {
+      if (!Array.isArray(cfgObj.port_forward)) cfgObj.port_forward = [];
+      cfgObj.port_forward.push({ bind_addr: '', dst_addr: '' });
+      renderPortForwardPane();
+      markCfgDirty();
+    });
+  }
+
+  box.querySelectorAll('[data-pf-del]').forEach(el => {
+    el.addEventListener('click', () => {
+      cfgObj.port_forward.splice(+el.dataset.pfDel, 1);
+      renderPortForwardPane();
+      markCfgDirty();
+    });
+  });
+
+  box.querySelectorAll('[data-pf-tpl]').forEach(el => {
+    el.addEventListener('click', () => {
+      const t = CFG_PF_TEMPLATES[+el.dataset.pfTpl];
+      if (!Array.isArray(cfgObj.port_forward)) cfgObj.port_forward = [];
+      cfgObj.port_forward.push({ bind_addr: t.bind, dst_addr: t.dst });
+      renderPortForwardPane();
+      markCfgDirty();
+    });
+  });
+
+  box.querySelectorAll('[data-pf-bind]').forEach(el => {
+    el.addEventListener('input', () => {
+      const i = +el.dataset.pfBind;
+      if (cfgObj.port_forward[i]) cfgObj.port_forward[i].bind_addr = el.value.trim();
+      markCfgDirty();
+    });
+  });
+  box.querySelectorAll('[data-pf-dst]').forEach(el => {
+    el.addEventListener('input', () => {
+      const i = +el.dataset.pfDst;
+      if (cfgObj.port_forward[i]) cfgObj.port_forward[i].dst_addr = el.value.trim();
+      markCfgDirty();
+    });
+  });
+}
+
+/** 表单事件绑定 */
+function bindConfigEvents() {
+  const root = $('setDrawer');
+  if (!root) return;
+
+  // 分组折叠
+  root.querySelectorAll('.cfg-group > h5').forEach(h => {
+    h.addEventListener('click', () => h.parentElement.classList.toggle('folded'));
+  });
+
+  // 简单字段
+  root.querySelectorAll('[data-cfg]').forEach(el => {
+    const handler = () => {
+      const key = el.dataset.cfg;
+      const type = el.dataset.type;
+      let v;
+      if (type === 'bool') v = el.checked;
+      else v = el.value;
+
+      // 空字符串的数字字段要转成数字
+      if (type === 'text' && /^\d+$/.test(v) && key === 'flags.mtu') v = parseInt(v, 10);
+
+      setByPath(cfgObj, key, v);
+      markCfgDirty();
+    };
+    el.addEventListener(type === 'text' ? 'input' : 'change', handler);
+  });
+
+  // 密码显示切换
+  root.querySelectorAll('[data-eye]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const inp = $(btn.dataset.eye);
+      if (inp) inp.type = inp.type === 'password' ? 'text' : 'password';
+    });
+  });
+
+  // 列表增删改
+  root.querySelectorAll('[data-list-add]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.listAdd;
+      const arr = getByPath(cfgObj, key) || [];
+      arr.push('');
+      setByPath(cfgObj, key, arr);
+      renderConfigForm();
+      markCfgDirty();
+    });
+  });
+  root.querySelectorAll('[data-list-del]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.listDel;
+      const arr = getByPath(cfgObj, key) || [];
+      arr.splice(+btn.dataset.idx, 1);
+      setByPath(cfgObj, key, arr);
+      renderConfigForm();
+      markCfgDirty();
+    });
+  });
+  root.querySelectorAll('[data-cfg-list]').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const key = inp.dataset.cfgList;
+      const arr = getByPath(cfgObj, key) || [];
+      arr[+inp.dataset.idx] = inp.value.trim();
+      setByPath(cfgObj, key, arr);
+      markCfgDirty();
+    });
+  });
+
+  // 数组表增删改
+  root.querySelectorAll('[data-tbl-add]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.tblAdd;
+      const sub = btn.dataset.sub;
+      if (!Array.isArray(cfgObj[key])) cfgObj[key] = [];
+      const item = {};
+      item[sub] = '';
+      cfgObj[key].push(item);
+      renderConfigForm();
+      markCfgDirty();
+    });
+  });
+  root.querySelectorAll('[data-tbl-del]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.tblDel;
+      if (Array.isArray(cfgObj[key])) cfgObj[key].splice(+btn.dataset.idx, 1);
+      renderConfigForm();
+      markCfgDirty();
+    });
+  });
+  root.querySelectorAll('[data-cfg-tbl]').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const key = inp.dataset.cfgTbl;
+      const sub = inp.dataset.sub;
+      const i = +inp.dataset.idx;
+      if (Array.isArray(cfgObj[key]) && cfgObj[key][i]) {
+        cfgObj[key][i][sub] = inp.value.trim();
+      }
+      markCfgDirty();
+    });
+  });
+}
+
+let cfgDirty = false;
+function markCfgDirty() {
+  cfgDirty = true;
+  const msg = $('cfgMsg');
+  if (msg) msg.innerHTML = '<span class="dirty-dot"></span> 有未保存的修改';
+}
+
+/** 从原始文本载入配置（唯一真相源） */
+function loadCfgFromText(text) {
+  cfgObj = parseToml(text);
+  if (!cfgObj.flags || typeof cfgObj.flags !== 'object') cfgObj.flags = {};
+  if (!cfgObj.network_identity) cfgObj.network_identity = {};
+  cfgDirty = false;
+  renderConfigForm();
+
+  const raw = $('rawArea');
+  if (raw) raw.value = text;
+  cfgRawChanged = false;
+  updateRawMeta(text);
+
+  const msg = $('cfgMsg');
+  if (msg) msg.textContent = '';
+}
+
+/** 表单改动 → 生成 TOML 文本 */
+function syncCfgToRaw() {
+  const text = genToml(cfgObj);
+  const raw = $('rawArea');
+  if (raw) raw.value = text;
+  updateRawMeta(text);
+  return text;
+}
+
+function updateRawMeta(text) {
+  const lines = String(text || '').split('\n').length;
+  const msg = $('rawMsg');
+  if (msg) {
+    msg.innerHTML = `共 <b>${lines}</b> 行 · ${cfgDirty ? '<span style="color:var(--orange)">已修改，未保存</span>' : '未修改'}`;
+  }
+}
+
+function initConfigUI() {
+  // 标签切换
+  const tabs = $('cfgTabs');
+  if (tabs) {
+    tabs.querySelectorAll('.cfg-tab').forEach(b => {
+      b.addEventListener('click', () => {
+        tabs.querySelectorAll('.cfg-tab').forEach(x => x.classList.remove('on'));
+        b.classList.add('on');
+        const t = b.dataset.t;
+        document.querySelectorAll('.cfg-pane').forEach(p => {
+          p.classList.toggle('hide', p.dataset.t !== t);
+        });
+        // 切到原始配置时，把表单改动同步过去
+        if (t === 'raw') syncCfgToRaw();
+      });
+    });
+  }
+
+  const rawArea = $('rawArea');
+  if (rawArea) {
+    rawArea.addEventListener('input', () => {
+      cfgRawChanged = true;
+      cfgDirty = true;
+      updateRawMeta(rawArea.value);
+    });
+  }
+
+  const copyBtn = $('btnRawCopy');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      const v = rawArea ? rawArea.value : '';
+      try {
+        await navigator.clipboard.writeText(v);
+        toast('已复制到剪贴板');
+      } catch (_) { toast('复制失败', 'err'); }
+    });
+  }
+
+  const reloadRaw = $('btnRawReload');
+  if (reloadRaw) {
+    reloadRaw.addEventListener('click', async () => {
+      await reloadConfigFromDisk();
+      toast('已重新载入');
+    });
+  }
+
+  const reloadBtn = $('btnCfgReload');
+  if (reloadBtn) {
+    reloadBtn.addEventListener('click', async () => {
+      await reloadConfigFromDisk();
+      toast('已重新载入');
+    });
+  }
+
+  const saveBtn = $('btnCfgSave');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async () => {
+      await saveConfigText();
+    });
+  }
+}
+
+async function reloadConfigFromDisk() {
+  try {
+    const j = await api('/api/config_text');
+    if (!j.ok) throw new Error('读取失败');
+    loadCfgFromText(j.data);
+  } catch (e) {
+    toast('读取配置失败: ' + e.message, 'err');
+  }
+}
+
+/** 保存：以原始配置为准；若表单有改动则先合并 */
+async function saveConfigText() {
+  const raw = $('rawArea');
+  let text;
+
+  // 表单改过但没切到原始页 → 用表单生成
+  if (cfgDirty && !cfgRawChanged) {
+    text = syncCfgToRaw();
+  } else {
+    text = raw ? raw.value : '';
+  }
+
+  try {
+    const j = await api('/api/config_text', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    });
+    if (!j.ok) throw new Error(j.message || '保存失败');
+    toast(j.message || '配置已保存');
+    cfgDirty = false;
+    cfgRawChanged = false;
+
+    // 重新解析一次，保持表单与文件一致
+    loadCfgFromText(text);
+
+    const msg = $('cfgMsg');
+    if (msg) msg.textContent = '';
+  } catch (e) {
+    toast('保存失败: ' + e.message, 'err');
+  }
+}
+
+/* ============================================================
+ * 延迟趋势大图（S6 需求）
+ * 小 sparkline 点击后展开，支持 1h/6h/24h 与延迟/丢包切换
+ * ============================================================ */
+
+let chartPeer = null;       // 当前查看的节点
+let chartRange = 1440;      // 分钟
+let chartMetric = 'lat';    // lat | loss
+let chartData = [];         // [{t, v}]
+
+/** 打开大图 */
+async function openLatencyChart(nodeId, hostname) {
+  chartPeer = nodeId;
+  const m = $('chartModal');
+  if (!m) return;
+  const t = $('chartTitle');
+  if (t) t.textContent = hostname || '节点';
+  m.classList.add('open');
+  await loadChartData();
+}
+
+async function loadChartData() {
+  if (!chartPeer) return;
+
+  // 优先走后端历史；失败则用本地内存缓冲兜底
+  let pts = null;
+  try {
+    const j = await api('/api/latency_history?node=' + encodeURIComponent(chartPeer) +
+      '&minutes=' + chartRange);
+    if (j.ok && Array.isArray(j.data) && j.data.length) pts = j.data;
+  } catch (_) {}
+
+  if (!pts) {
+    // 兜底：用前端已有采样
+    const hist = latHistory.get(chartPeer) || [];
+    pts = hist.map((v, i) => ({ t: Date.now() - (hist.length - i) * 2000, v }));
+  }
+
+  chartData = pts.map(p => ({
+    t: p.t || p.ts * 1000 || 0,
+    v: chartMetric === 'lat' ? (p.v != null ? p.v : p.lat) : (p.loss != null ? p.loss : 0),
+  })).filter(p => p.v != null && !isNaN(p.v));
+
+  drawBigChart();
+  updateChartStats();
+}
+
+function drawBigChart() {
+  const svg = $('bigChart');
+  if (!svg) return;
+
+  const W = 760, H = 220, L = 44, R = 11, T = 11, B = 26;
+  const cw = W - L - R, ch = H - T - B;
+
+  if (!chartData.length) {
+    svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle"
+      fill="var(--txt-mute)" font-size="12">暂无历史数据（采集一段时间后自动生成）</text>`;
+    return;
+  }
+
+  const n = chartData.length;
+  const vals = chartData.map(d => d.v);
+  const mn = Math.min(...vals), mx = Math.max(...vals);
+  const pad = (mx - mn) * 0.12 || 1;
+  const y0 = Math.max(0, mn - pad), y1 = mx + pad;
+  const X = i => L + (n > 1 ? (i / (n - 1)) * cw : cw / 2);
+  const Y = v => T + (1 - (v - y0) / (y1 - y0)) * ch;
+
+  const unit = chartMetric === 'lat' ? 'ms' : '%';
+  const col = chartMetric === 'lat' ? 'var(--brand)' : 'var(--red)';
+
+  // 网格 + Y 轴
+  let grid = '';
+  for (let i = 0; i <= 4; i++) {
+    const y = T + (i / 4) * ch;
+    const val = y1 - (i / 4) * (y1 - y0);
+    grid += `<line x1="${L}" y1="${y.toFixed(1)}" x2="${W - R}" y2="${y.toFixed(1)}"
+      stroke="var(--line-soft)" stroke-width="1" ${i === 4 ? '' : 'stroke-dasharray="3 3"'}/>`;
+    grid += `<text x="${L - 6}" y="${(y + 3.5).toFixed(1)}" text-anchor="end"
+      fill="var(--txt-mute)" font-size="9" font-family="Consolas,monospace">${val.toFixed(chartMetric === 'lat' ? 0 : 1)}</text>`;
+  }
+
+  // X 轴时间标签
+  let xlab = '';
+  const t0 = chartData[0].t, t1 = chartData[n - 1].t;
+  const fmt = ts => {
+    const d = new Date(ts);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  };
+  for (let i = 0; i <= 4; i++) {
+    const x = L + (i / 4) * cw;
+    const ts = t0 + (i / 4) * (t1 - t0);
+    xlab += `<text x="${x.toFixed(1)}" y="${H - 7}"
+      text-anchor="${i === 0 ? 'start' : i === 4 ? 'end' : 'middle'}"
+      fill="var(--txt-mute)" font-size="9">${i === 4 ? '现在' : fmt(ts)}</text>`;
+  }
+
+  // 折线
+  const pts = chartData.map((d, i) => [X(i), Y(d.v)]);
+  const line = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  const area = line + ` L${(W - R).toFixed(1)} ${T + ch} L${L} ${T + ch} Z`;
+  const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+
+  svg.innerHTML = `
+    <defs><linearGradient id="chartGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${col}" stop-opacity=".26"/>
+      <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
+    </linearGradient></defs>
+    ${grid}
+    <path d="${area}" fill="url(#chartGrad)"/>
+    <path d="${line}" fill="none" stroke="${col}" stroke-width="1.7"
+      stroke-linejoin="round" stroke-linecap="round"/>
+    <line x1="${L}" y1="${Y(avg).toFixed(1)}" x2="${W - R}" y2="${Y(avg).toFixed(1)}"
+      stroke="var(--orange)" stroke-width="1" stroke-dasharray="4 4" opacity=".75"/>
+    <text x="${W - R - 4}" y="${(Y(avg) - 4).toFixed(1)}" text-anchor="end"
+      fill="var(--orange)" font-size="8.5" opacity=".9">平均 ${avg.toFixed(1)}</text>
+    <line id="chartCross" x1="0" y1="${T}" x2="0" y2="${T + ch}"
+      stroke="var(--txt-mute)" stroke-width="1" stroke-dasharray="3 3" opacity="0"/>
+    <circle id="chartDot" cx="0" cy="0" r="3.2" fill="${col}"
+      stroke="var(--bg-elev)" stroke-width="1.6" opacity="0"/>
+    ${xlab}
+    <rect x="${L}" y="${T}" width="${cw}" height="${ch}" fill="transparent" id="chartHit"/>`;
+
+  bindChartHover(svg, W, L, cw, ch, T, X, Y, n, unit);
+}
+
+function bindChartHover(svg, W, L, cw, ch, T, X, Y, n, unit) {
+  const hit = svg.querySelector('#chartHit');
+  const cross = svg.querySelector('#chartCross');
+  const dot = svg.querySelector('#chartDot');
+  const tip = $('chartTip');
+  const tipT = $('chartTipT');
+  const tipV = $('chartTipV');
+  const tipU = $('chartTipU');
+  const wrap = svg.closest('.chart-wrap');
+  if (!hit) return;
+
+  hit.addEventListener('mousemove', e => {
+    const rect = svg.getBoundingClientRect();
+    const px = (e.clientX - rect.left) / rect.width * W;
+    let idx = Math.round((px - L) / cw * (n - 1));
+    idx = Math.max(0, Math.min(n - 1, idx));
+    const d = chartData[idx];
+    const x = X(idx), y = Y(d.v);
+
+    cross.setAttribute('x1', x); cross.setAttribute('x2', x); cross.setAttribute('opacity', '1');
+    dot.setAttribute('cx', x); dot.setAttribute('cy', y); dot.setAttribute('opacity', '1');
+
+    if (tip && wrap) {
+      const wr = wrap.getBoundingClientRect();
+      const scale = wr.width / W;
+      const dt = new Date(d.t);
+      if (tipT) tipT.textContent =
+        `${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`;
+      if (tipV) tipV.textContent = d.v.toFixed(2);
+      if (tipU) tipU.textContent = unit;
+      tip.classList.add('show');
+
+      const tw = tip.offsetWidth, th = tip.offsetHeight;
+      let tx = x * scale - tw / 2 + 8;
+      let ty = y * scale - th - 8;
+      tx = Math.max(3, Math.min(wr.width - tw - 3, tx));
+      ty = Math.max(3, ty);
+      tip.style.left = tx + 'px';
+      tip.style.top = ty + 'px';
+    }
+  });
+
+  hit.addEventListener('mouseleave', () => {
+    cross.setAttribute('opacity', '0');
+    dot.setAttribute('opacity', '0');
+    if (tip) tip.classList.remove('show');
+  });
+}
+
+function updateChartStats() {
+  const box = $('chartStats');
+  if (!box) return;
+  if (!chartData.length) {
+    box.innerHTML = `
+      <div class="stat min"><div class="k">最小</div><div class="v">—</div></div>
+      <div class="stat"><div class="k">平均</div><div class="v">—</div></div>
+      <div class="stat max"><div class="k">最大</div><div class="v">—</div></div>
+      <div class="stat loss"><div class="k">丢包率</div><div class="v">—</div></div>`;
+    return;
+  }
+  const vals = chartData.map(d => d.v);
+  const mn = Math.min(...vals);
+  const mx = Math.max(...vals);
+  const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const unit = chartMetric === 'lat' ? ' ms' : '%';
+
+  // 丢包率取当前 peer 的值
+  const peer = (lastStatus && (lastStatus.peers || []).find(p => (p.hostname || p.id) === chartPeer)) || {};
+  const loss = peer.loss_rate || '—';
+
+  box.innerHTML = `
+    <div class="stat min"><div class="k">最小</div><div class="v">${mn.toFixed(2)}${unit}</div></div>
+    <div class="stat"><div class="k">平均</div><div class="v">${avg.toFixed(2)}${unit}</div></div>
+    <div class="stat max"><div class="k">最大</div><div class="v">${mx.toFixed(2)}${unit}</div></div>
+    <div class="stat loss"><div class="k">丢包率</div><div class="v">${esc(loss)}</div></div>`;
+}
+
+function initChartUI() {
+  const rangeSeg = $('rangeSeg');
+  if (rangeSeg) {
+    rangeSeg.querySelectorAll('button').forEach(b => {
+      b.addEventListener('click', async () => {
+        rangeSeg.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+        b.classList.add('on');
+        chartRange = +b.dataset.r;
+        await loadChartData();
+      });
+    });
+  }
+
+  const metricSeg = $('metricSeg');
+  if (metricSeg) {
+    metricSeg.querySelectorAll('button').forEach(b => {
+      b.addEventListener('click', async () => {
+        metricSeg.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+        b.classList.add('on');
+        chartMetric = b.dataset.m;
+        await loadChartData();
+      });
+    });
+  }
+
+  const csv = $('btnChartCsv');
+  if (csv) {
+    csv.addEventListener('click', () => {
+      if (!chartData.length) { toast('暂无数据可导出', 'err'); return; }
+      const rows = [['timestamp', 'time', chartMetric === 'lat' ? 'latency_ms' : 'loss_percent']];
+      chartData.forEach(d => {
+        const dt = new Date(d.t);
+        rows.push([Math.floor(d.t / 1000),
+          `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')} ` +
+          `${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}:${String(dt.getSeconds()).padStart(2, '0')}`,
+          d.v.toFixed(3)]);
+      });
+      const csvText = rows.map(r => r.join(',')).join('\n');
+      const blob = new Blob(['\ufeff' + csvText], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${chartPeer || 'node'}-${chartMetric}-${Date.now()}.csv`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      toast('已导出 CSV');
+    });
+  }
+}
+
+/* ============================================================
+ * 节点详情（S7 需求）
+ * 按需查询，不进主轮询（否则每 2 秒跑三个 CLI 会拖慢界面）
+ * ============================================================ */
+
+let detailPeerId = null;
+let detailText = '';
+
+async function openNodeDetail(idxOrId) {
+  const m = $('detailModal');
+  if (!m) return;
+
+  detailPeerId = idxOrId;
+  m.classList.add('open');
+  const body = $('detailBody');
+  if (body) body.innerHTML = '<div class="detail-loading">正在读取节点信息…</div>';
+
+  let d = null;
+  try {
+    const j = await api('/api/peer_detail?id=' + encodeURIComponent(idxOrId));
+    if (j.ok && j.data) d = j.data;
+  } catch (_) {}
+
+  // 后端没实现时用当前快照兜底
+  if (!d) {
+    const peers = (lastStatus && lastStatus.peers) || [];
+    const p = typeof idxOrId === 'number' ? peers[idxOrId]
+      : peers.find(x => (x.hostname || x.id) === idxOrId);
+    if (!p) {
+      if (body) body.innerHTML = '<div class="detail-loading">未找到该节点</div>';
+      return;
+    }
+    d = buildDetailFallback(p, lastStatus);
+  }
+
+  renderDetail(d);
+}
+
+function buildDetailFallback(p, status) {
+  const peers = (status && status.peers) || [];
+  const myVer = (peers.find(x => x.kind === 'local') || {}).version || '';
+  const lat = parseFloat(p.lat_ms);
+  const loss = parseFloat(p.loss_rate);
+  const routes = (status && status.routes) || [];
+  const route = routes.find(r => r.hostname === p.hostname || r.ipv4 === p.ipv4);
+
+  // 从 peer-center 数据里找该节点的直连邻居（若后端提供）
+  const neighbors = (status && status.peer_center || [])
+    .filter(n => n.hostname === p.hostname)
+    .flatMap(n => n.direct_peers || []);
+
+  return {
+    hostname: p.hostname || '—',
+    ipv4: p.ipv4 || '',
+    cidr: p.cidr || '',
+    peer_id: p.id || '',
+    kind: p.kind,
+    cost: p.cost || '',
+    tunnel_proto: p.tunnel_proto || '',
+    nat_label: p.nat_label || '',
+    version: p.version || '',
+    version_match: !myVer || p.version === myVer || p.kind === 'local',
+    lat, loss,
+    rx: p.rx || p.rx_bytes || '',
+    tx: p.tx || p.tx_bytes || '',
+    route: route || null,
+    neighbors,
+  };
+}
+
+function renderDetail(d) {
+  const body = $('detailBody');
+  const title = $('detailTitle');
+  if (!body) return;
+  if (title) title.textContent = d.hostname || '节点';
+
+  const kindTxt = d.kind === 'local' ? '本机' : (d.kind === 'relay' ? `经中转（${d.cost || 'relay'}）` : '直连 (p2p)');
+  const kindCol = d.kind === 'local' ? 'var(--brand)' : (d.kind === 'relay' ? 'var(--orange)' : 'var(--green)');
+  const latTxt = isNaN(d.lat) ? '—' : d.lat.toFixed(2) + ' ms';
+  const lossTxt = isNaN(d.loss) ? '—' : d.loss.toFixed(1) + '%';
+  const latCol = isNaN(d.lat) ? 'var(--txt-mute)' : (d.lat < 15 ? 'var(--green)' : d.lat < 50 ? 'var(--txt)' : d.lat < 150 ? 'var(--orange)' : 'var(--red)');
+
+  const verShort = d.version ? String(d.version).split('-')[0] : '';
+  const verHtml = verShort
+    ? `<span class="ver${d.version_match ? ' ver-ok' : ' ver-bad'}">${esc(verShort)}${d.version_match ? ' ✓' : ' ⚠ 与本机不一致'}</span>`
+    : '<span class="muted">—</span>';
+
+  // 流量合计
+  const parseBytes = s => {
+    const m = String(s || '').match(/^([\d.]+)\s*(B|kB|MB|GB)/i);
+    if (!m) return 0;
+    const n = parseFloat(m[1]);
+    const u = m[2].toUpperCase();
+    return n * (u === 'GB' ? 1073741824 : u === 'MB' ? 1048576 : u === 'KB' ? 1024 : 1);
+  };
+  const fmtBytes = b => {
+    if (!b) return '—';
+    if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB';
+    if (b >= 1048576) return (b / 1048576).toFixed(2) + ' MB';
+    if (b >= 1024) return (b / 1024).toFixed(2) + ' kB';
+    return b.toFixed(0) + ' B';
+  };
+  const rxB = parseBytes(d.rx), txB = parseBytes(d.tx);
+  const totalB = rxB + txB;
+
+  let neighHtml = '';
+  if (d.neighbors && d.neighbors.length) {
+    neighHtml = `<div class="d-sec">
+      <h4>该节点的直连邻居 <span class="d-sub">来自 peer-center</span></h4>
+      <div class="neigh-list">
+        ${d.neighbors.map(n => `
+          <div class="neigh">
+            <span class="hn">${esc(n.hostname || n.node_id || '—')}</span>
+            <span class="muted mono">${esc(n.ipv4 || '—')}</span>
+            <span class="lat" style="color:${n.latency_ms < 15 ? 'var(--green)' : 'var(--txt)'}">
+              ${n.latency_ms != null ? n.latency_ms + ' ms' : '—'}</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  let routeHtml = '';
+  if (d.route) {
+    const r = d.route;
+    routeHtml = `<div class="d-sec">
+      <h4>路径</h4>
+      <div class="d-grid">
+        <div class="d-field"><div class="k">跳数</div><div class="v">${r.path_len != null ? r.path_len + ' 跳' : '—'}</div></div>
+        <div class="d-field"><div class="k">路径延迟</div><div class="v">${r.path_latency != null ? r.path_latency.toFixed(2) + ' ms' : '—'}</div></div>
+        <div class="d-field"><div class="k">下一跳</div><div class="v">${esc(r.next_hop_hostname || '—')}</div></div>
+        <div class="d-field"><div class="k">可访问网段</div><div class="v mono">${esc(r.proxy_cidrs || '—')}</div></div>
+      </div>
+    </div>`;
+  }
+
+  body.innerHTML = `
+    <div class="d-sec">
+      <h4>基本信息</h4>
+      <div class="d-grid">
+        <div class="d-field"><div class="k">主机名</div><div class="v">${esc(d.hostname || '—')}</div></div>
+        <div class="d-field"><div class="k">虚拟 IP</div><div class="v mono">${esc(d.ipv4 || '—')}</div></div>
+        <div class="d-field"><div class="k">网段</div><div class="v mono">${esc(d.cidr || '—')}</div></div>
+        <div class="d-field"><div class="k">Peer ID</div><div class="v mono">${esc(d.peer_id || '—')}</div></div>
+        <div class="d-field"><div class="k">连接方式</div><div class="v" style="color:${kindCol}">${kindTxt}</div></div>
+        <div class="d-field"><div class="k">隧道协议</div><div class="v">${esc(d.tunnel_proto || '—')}</div></div>
+        <div class="d-field"><div class="k">版本</div><div class="v mono">${verHtml}</div></div>
+        <div class="d-field"><div class="k">NAT 类型</div><div class="v">${esc(d.nat_label || '—')}</div></div>
+      </div>
+    </div>
+
+    <div class="d-sec">
+      <h4>连接质量</h4>
+      <div class="d-grid">
+        <div class="d-field"><div class="k">当前延迟</div><div class="v" style="color:${latCol}">${latTxt}</div></div>
+        <div class="d-field"><div class="k">丢包率</div><div class="v" style="color:${d.loss > 0 ? 'var(--red)' : 'var(--txt-mute)'}">${lossTxt}</div></div>
+        <div class="d-field"><div class="k">近 1 小时平均</div><div class="v">${d.avg1h != null ? d.avg1h.toFixed(2) + ' ms' : '—'}</div></div>
+        <div class="d-field"><div class="k">近 1 小时峰值</div><div class="v">${d.max1h != null ? d.max1h.toFixed(2) + ' ms' : '—'}</div></div>
+      </div>
+    </div>
+
+    <div class="d-sec">
+      <h4>流量</h4>
+      <div class="d-grid">
+        <div class="d-field"><div class="k">接收</div><div class="v mono">${esc(d.rx || '—')}</div></div>
+        <div class="d-field"><div class="k">发送</div><div class="v mono">${esc(d.tx || '—')}</div></div>
+        <div class="d-field"><div class="k">合计</div><div class="v mono">${fmtBytes(totalB)}</div></div>
+        <div class="d-field"><div class="k">收发比</div><div class="v">${rxB && txB ? '1 : ' + (txB / rxB).toFixed(1) : '—'}</div></div>
+      </div>
+    </div>
+
+    ${routeHtml}
+    ${neighHtml}
+
+    <div class="d-sec">
+      <h4>延迟趋势（近 1 小时）</h4>
+      <div class="mini-chart" id="detailMiniChart">
+        <svg viewBox="0 0 700 64" preserveAspectRatio="none"
+          style="width:100%;height:100%;display:block" id="detailMiniSvg"></svg>
+      </div>
+    </div>`;
+
+  drawDetailMiniChart(d);
+
+  // 组装纯文本供复制
+  detailText = [
+    `主机名: ${d.hostname || '—'}`,
+    `虚拟 IP: ${d.ipv4 || '—'}`,
+    `网段: ${d.cidr || '—'}`,
+    `Peer ID: ${d.peer_id || '—'}`,
+    `连接方式: ${kindTxt}`,
+    `隧道协议: ${d.tunnel_proto || '—'}`,
+    `版本: ${d.version || '—'}${d.version_match ? '' : ' (与本机不一致)'}`,
+    `NAT 类型: ${d.nat_label || '—'}`,
+    `当前延迟: ${latTxt}`,
+    `丢包率: ${lossTxt}`,
+    `接收: ${d.rx || '—'}`,
+    `发送: ${d.tx || '—'}`,
+    `合计: ${fmtBytes(totalB)}`,
+  ].join('\n');
+}
+
+function drawDetailMiniChart(d) {
+  const svg = $('detailMiniSvg');
+  if (!svg) return;
+  const hist = latHistory.get(d.hostname || d.peer_id) || [];
+  if (hist.length < 2) {
+    svg.innerHTML = `<text x="350" y="36" text-anchor="middle" fill="var(--txt-mute)" font-size="10">采样中，稍候显示趋势</text>`;
+    return;
+  }
+  const W = 700, H = 64, P = 3;
+  const mn = Math.min(...hist), mx = Math.max(...hist);
+  const sp = Math.max(mx - mn, 0.01);
+  const pts = hist.map((v, i) => [
+    P + (i / (hist.length - 1)) * (W - P * 2),
+    P + (1 - (v - mn) / sp) * (H - P * 2),
+  ]);
+  const line = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  const area = line + ` L${W - P} ${H} L${P} ${H} Z`;
+  svg.innerHTML = `
+    <defs><linearGradient id="miniGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="var(--brand)" stop-opacity=".3"/>
+      <stop offset="100%" stop-color="var(--brand)" stop-opacity="0"/>
+    </linearGradient></defs>
+    <path d="${area}" fill="url(#miniGrad)"/>
+    <path d="${line}" fill="none" stroke="var(--brand)" stroke-width="1.6"
+      stroke-linejoin="round" stroke-linecap="round"/>`;
+}
+
+function initDetailUI() {
+  const copy = $('btnDetailCopy');
+  if (copy) {
+    copy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(detailText);
+        toast('已复制节点信息');
+      } catch (_) { toast('复制失败', 'err'); }
+    });
+  }
+}
+
+/* ---------------- 主题（设置面板版） ----------------
+ *
+ * 5 套固定配色 + 跟随系统。
+ * 不做自由配色：界面有大量语义色（延迟绿/黄/橙/红、告警橙），
+ * 允许自定义主色容易与语义色撞车，用户分不清「主题色还是告警色」。
+ * ---------------------------------------------- */
+
+const THEMES = [
+  { id: 'dark',     name: '深色',     bg: '#0f1319', accent: '#3b82f6' },
+  { id: 'light',    name: '浅色',     bg: '#f5f7fa', accent: '#2563eb' },
+  { id: 'midnight', name: '午夜蓝',   bg: '#0b1020', accent: '#6366f1' },
+  { id: 'sand',     name: '暖沙',     bg: '#f7f3ec', accent: '#b45309' },
+  { id: 'forest',   name: '墨绿',     bg: '#0c1512', accent: '#10b981' },
+  { id: 'auto',     name: '跟随系统', bg: 'auto',    accent: '#64748b' },
+];
+
+let themeChoice = 'dark';
+
+function systemPrefersDark() {
+  try { return window.matchMedia('(prefers-color-scheme: dark)').matches; }
+  catch (_) { return true; }
+}
+
+function resolveTheme(choice) {
+  if (choice !== 'auto') return choice;
+  return systemPrefersDark() ? 'dark' : 'light';
+}
+
+function themeIsDark(id) {
+  const t = THEMES.find(x => x.id === id);
+  if (!t) return true;
+  if (t.id === 'auto') return systemPrefersDark();
+  return !(t.id === 'light' || t.id === 'sand');
+}
+
+function applyTheme(choice) {
+  themeChoice = choice;
+  const actual = resolveTheme(choice);
+
+  document.documentElement.dataset.theme = actual;
+  document.documentElement.style.colorScheme = themeIsDark(actual) ? 'dark' : 'light';
+
+  // 重绘依赖颜色的 SVG
+  requestAnimationFrame(() => {
+    renderTopo();
+    if ($('chartModal') && $('chartModal').classList.contains('open')) drawBigChart();
+  });
+}
+
+function saveTheme(choice) {
+  try { localStorage.setItem(THEME_KEY, choice); } catch (_) {}
+}
+
+function renderThemeList() {
+  const grid = $('themeGrid');
+  if (!grid) return;
+
+  grid.innerHTML = THEMES.map(t => {
+    const prev = t.id === 'auto'
+      ? `<div class="prev" style="background:linear-gradient(100deg,#0f1319 0 50%,#f5f7fa 50% 100%)"></div>`
+      : `<div class="prev"><i style="background:${t.bg}"></i><i style="background:${t.accent}"></i></div>`;
+    return `<div class="theme-card ${themeChoice === t.id ? 'on' : ''}" data-theme="${t.id}">
+      ${prev}
+      <div class="nm">${t.name}
+        <span class="tick"><svg viewBox="0 0 10 10"><path d="M2 5l2.4 2.4L8 3"/></svg></span>
+      </div>
+    </div>`;
+  }).join('');
+
+  grid.querySelectorAll('[data-theme]').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.theme;
+      applyTheme(id);
+      saveTheme(id);
+      renderThemeList();
+    });
+  });
+}
+
+function initTheme() {
+  let saved = 'dark';
+  try {
+    const v = localStorage.getItem(THEME_KEY);
+    if (v && THEMES.some(t => t.id === v)) saved = v;
+  } catch (_) {}
+  applyTheme(saved);
+  renderThemeList();
+
+  try {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => { if (themeChoice === 'auto') applyTheme('auto'); };
+    if (mq.addEventListener) mq.addEventListener('change', onChange);
+    else if (mq.addListener) mq.addListener(onChange);
+  } catch (_) {}
+}
+
+/* ---------------- 状态渲染 ---------------- */
+
+
 function renderStatus(d) {
+  lastStatus = d;
   const badge = $('connBadge'), text = $('connText');
 
-  // 若当前处于「操作中」，不要被轮询结果覆盖，
-  // 否则用户点了启动、界面又跳回「已停止」，看起来像没反应
   if (!BADGE_BUSY) {
     if (d.running) {
       badge.className = 'badge badge-green';
@@ -1249,16 +3205,28 @@ function renderStatus(d) {
     }
   }
 
-  // 按钮可用性：loading 中的按钮保持 disabled，不要被状态刷新覆盖
   const setDis = (id, dis) => {
     const b = $(id);
     if (!b) return;
-    if (b.classList.contains('is-loading')) return;  // 正在进行操作，别动
+    if (b.classList.contains('is-loading')) return;
     b.disabled = dis;
   };
   setDis('btnStart', d.running);
   setDis('btnStop', !d.running);
   setDis('btnRestart', !d.running);
+
+  // 顶部副标题：本机身份
+  const n = d.node;
+  const sub = $('nodeSub');
+  if (sub) {
+    if (n) {
+      const ip = (n.ipv4_addr || '').split('/')[0];
+      const ver = n.version ? 'v' + String(n.version).split('-')[0] : '';
+      sub.textContent = [n.hostname, ip, ver].filter(Boolean).join(' · ');
+    } else {
+      sub.textContent = d.running ? '读取中…' : '核心未运行';
+    }
+  }
 
   renderNode(d);
   renderPeers(d);
@@ -1266,9 +3234,15 @@ function renderStatus(d) {
   renderRoutes(d);
   renderForwards(d);
   renderActive(d);
+
+  // 拓扑数据
+  topoPeers = d.peers || [];
+  renderTopo();
 }
 
 /* ---------------- 轮询 ---------------- */
+
+let refreshTimer = null;
 
 async function refresh() {
   try {
@@ -1281,14 +3255,12 @@ async function refresh() {
 
     if (lastRunning !== null && lastRunning !== d.running) {
       toast(d.running ? '核心已启动' : '核心已停止', d.running ? 'ok' : 'err');
-      if (drawerMode === 'log') loadLog();
+      if (currentLogTab === 'core') loadLog(true);
     }
     lastRunning = d.running;
   } catch (e) {
     failCount++;
-    // 操作进行中不要被失联提示覆盖
     if (BADGE_BUSY) return;
-    // 连续 3 次失败才显示失联，避免偶发抖动
     if (failCount >= 3) {
       $('connBadge').className = 'badge badge-red';
       $('connText').textContent = '面板失联';
@@ -1300,280 +3272,422 @@ async function refresh() {
 }
 
 function startPolling() {
-  if (timer) clearInterval(timer);
-  timer = setInterval(refresh, REFRESH_MS);
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(refresh, REFRESH_MS);
 }
 
 /* ---------------- 操作 ---------------- */
 
-/**
- * 执行一个动作命令（启动/停止/重启）
- *
- * @param path    接口路径
- * @param label   动作名（"启动"）
- * @param opts    { btnId, busyTitle, busyDesc }
- *                btnId     - 哪个按钮显示内联转圈
- *                busyTitle - 遮罩标题（不传则不显示遮罩）
- *                busyDesc  - 遮罩副标题
- */
 async function action(path, label, opts = {}) {
   const { btnId, busyTitle, busyDesc } = opts;
 
-  // ---- 进入 loading 态 ----
   if (btnId) setBtnLoading(btnId, true);
   if (busyTitle) setBusy(true, busyTitle, busyDesc);
-  setBadgeBusy(label + '中…');
-  // 暂停轮询，避免请求进行中又被定时刷新覆盖状态
-  if (timer) { clearInterval(timer); timer = null; }
+  else setBadgeBusy(label + '中…');
 
   try {
-    const j = await api(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}'
-    });
-
-    // 成功但消息里带「清理了 N 个残留网卡」时，用 info 风格提示
-    const msg = j.message || (label + (j.ok ? '成功' : '失败'));
-    toast(msg, j.ok ? 'ok' : 'err');
-
-    // ---- 退出 loading 态 ----
-    setBusy(false);
-    if (btnId) setBtnLoading(btnId, false);
-    clearBadgeBusy();
-
-    // 立即刷新一次，让界面数据跟上
+    const j = await api(path, { method: 'POST' });
+    if (!j.ok) throw new Error(j.message || `${label}失败`);
+    toast(j.message || `${label}成功`, 'ok');
     await refresh();
-    startPolling();
   } catch (e) {
-    setBusy(false);
+    toast(`${label}失败: ${e.message}`, 'err');
+  } finally {
     if (btnId) setBtnLoading(btnId, false);
-    clearBadgeBusy();
-    toast(label + '失败: ' + (e.message || e), 'err');
-    // 出错也要恢复轮询，否则界面就"死"了
-    await refresh().catch(() => {});
-    startPolling();
+    if (busyTitle) setBusy(false);
+    else clearBadgeBusy();
+    refresh();
   }
 }
 
-/** 包装一个轻量操作（只在按钮上转圈，不遮挡界面） */
 async function lightAction(btnId, fn, label) {
   setBtnLoading(btnId, true);
   try {
     await fn();
   } catch (e) {
-    toast((label || '操作') + '失败: ' + (e.message || e), 'err');
+    toast(`${label}失败: ${e.message}`, 'err');
   } finally {
     setBtnLoading(btnId, false);
   }
 }
 
-/* ---------------- 抽屉 / 弹窗 ---------------- */
+/* ---------------- 日志 ---------------- */
 
-function openDrawer(title, mode) {
-  $('drawerTitle').textContent = title;
-  drawerMode = mode;
-  $('drawer').classList.add('open');
-  $('overlay').classList.add('show');
-}
+let currentLogTab = 'core';
+let currentLogLevel = 'all';
+let logRawText = '';
 
-function closeDrawer() {
-  $('drawer').classList.remove('open');
-  drawerMode = null;
-  if (!$('modal').classList.contains('open')) {
-    $('overlay').classList.remove('show');
-  }
-}
+async function loadLog(silent) {
+  const view = $('logView');
+  if (!view) return;
 
-/**
- * 把日志里的 UTC 时间戳转成本地时间显示
- *
- * easytier-core 输出的格式是 `2026-11-10T03:01:52.556Z`（UTC），
- * 直接展示会让人误以为时间不对。这里替换成 `2026-11-10 11:01:52.556`。
- */
-function localizeTimestamps(text) {
-  return text.replace(
-    /(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z/g,
-    (m, Y, Mo, D, h, mi, s, ms) => {
-      const d = new Date(Date.UTC(+Y, +Mo - 1, +D, +h, +mi, +s, ms ? +ms : 0));
-      if (isNaN(d.getTime())) return m;
-      const p2 = (n) => String(n).padStart(2, '0');
-      const p3 = (n) => String(n).padStart(3, '0');
-      return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ` +
-             `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.${p3(d.getMilliseconds())}`;
+  const path = currentLogTab === 'app'
+    ? '/api/app_log?lines=400'
+    : '/api/log?lines=400';
+
+  try {
+    const j = await api(path);
+    if (!j.ok) throw new Error(j.error || '读取失败');
+    logRawText = j.data || '';
+    renderLogText();
+  } catch (e) {
+    if (!silent) {
+      view.textContent = '读取日志失败: ' + e.message;
     }
-  );
-}
-
-async function loadLog() {
-  const el = $('drawerBody');
-  // 首次打开（内容为空）时显示加载提示，避免一片空白
-  const isEmpty = !el.textContent || el.textContent.trim() === '';
-  if (isEmpty) {
-    el.textContent = '正在读取日志…';
-  }
-  try {
-    const j = await api('/api/log?lines=400');
-    const raw = j.data || '(空)';
-    el.textContent = localizeTimestamps(raw);
-    el.scrollTop = el.scrollHeight;
-  } catch (e) {
-    el.textContent = '读取失败: ' + (e.message || e);
   }
 }
 
-async function openConfig() {
-  try {
-    const j = await api('/api/config_text');
-    $('cfgText').value = j.data;
-    $('cfgMsg').textContent = '';
-    $('modal').classList.add('open');
-    $('overlay').classList.add('show');
-  } catch (e) {
-    toast('读取配置失败: ' + e.message, 'err');
+function renderLogText() {
+  const view = $('logView');
+  if (!view) return;
+
+  let lines = String(logRawText || '').split('\n');
+
+  if (currentLogLevel === 'warn') {
+    lines = lines.filter(l => /WARN|ERROR|error=|failed/i.test(l));
+  } else if (currentLogLevel === 'error') {
+    lines = lines.filter(l => /ERROR|error=|failed/i.test(l));
   }
+
+  view.innerHTML = lines.map(l => {
+    if (/ERROR|error=|failed/i.test(l)) return `<span class="le">${esc(l)}</span>`;
+    if (/WARN/i.test(l)) return `<span class="lw">${esc(l)}</span>`;
+    if (/INFO/i.test(l)) return `<span class="li">${esc(l)}</span>`;
+    return esc(l);
+  }).join('\n');
+
+  const auto = $('cbLogAuto');
+  if (auto && auto.checked) view.scrollTop = view.scrollHeight;
 }
 
-function closeConfig() {
-  $('modal').classList.remove('open');
-  if (!$('drawer').classList.contains('open')) {
-    $('overlay').classList.remove('show');
-  }
-}
-
-async function saveConfig() {
-  const text = $('cfgText').value;
-  $('cfgMsg').textContent = '校验中…';
-  setBtnLoading('btnCfgSave', true);
-  try {
-    const j = await api('/api/config_text', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text })
+function initLogUI() {
+  const seg = $('logSeg');
+  if (seg) {
+    seg.querySelectorAll('button').forEach(b => {
+      b.addEventListener('click', () => {
+        seg.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+        b.classList.add('on');
+        currentLogTab = b.dataset.l;
+        const p = $('logPath');
+        if (p) {
+          p.textContent = currentLogTab === 'app'
+            ? 'logs\\console.log'
+            : 'logs\\easytier-runtime.log';
+        }
+        loadLog();
+      });
     });
-    $('cfgMsg').textContent = j.message;
-    toast(j.message, 'ok');
-    // 稍等片刻再关弹窗，让用户看到「已保存」
-    setTimeout(() => {
-      closeConfig();
-      refresh().catch(() => {});
-    }, 600);
+  }
+
+  const lvSeg = $('logLevelSeg');
+  if (lvSeg) {
+    lvSeg.querySelectorAll('button').forEach(b => {
+      b.addEventListener('click', () => {
+        lvSeg.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+        b.classList.add('on');
+        currentLogLevel = b.dataset.lv;
+        renderLogText();
+      });
+    });
+  }
+
+  const rb = $('btnLogRefresh');
+  if (rb) rb.addEventListener('click', () => lightAction('btnLogRefresh', () => loadLog(), '刷新'));
+
+  const dirBtn = $('btnLogDir');
+  if (dirBtn) dirBtn.addEventListener('click', () => lightAction('btnLogDir', openDir, '打开目录'));
+}
+
+/* ---------------- 设置抽屉 ---------------- */
+
+function openSettings(pane) {
+  const d = $('setDrawer');
+  if (!d) return;
+  d.classList.add('open');
+  const btn = $('btnSettings');
+  if (btn) btn.classList.add('on');
+  if (pane) switchSettingsPane(pane);
+  renderThemeList();
+  renderModList();
+  applyModules();
+  syncSettingsUI();
+}
+
+function closeSettings() {
+  const d = $('setDrawer');
+  if (d) d.classList.remove('open');
+  const btn = $('btnSettings');
+  if (btn) btn.classList.remove('on');
+}
+
+function switchSettingsPane(pane) {
+  document.querySelectorAll('#setNav .nav-item').forEach(x => {
+    x.classList.toggle('on', x.dataset.pane === pane);
+  });
+  document.querySelectorAll('.pane').forEach(x => {
+    x.classList.toggle('on', x.dataset.pane === pane);
+  });
+  if (pane === 'log') { loadLog(); }
+  if (pane === 'config') { reloadConfigFromDisk(); }
+}
+
+/** 把设置值同步到开关控件 */
+function syncSettingsUI() {
+  const map = {
+    setStopOnExit: 'stop_core_on_exit',
+    setConfirmExit: 'confirm_on_exit',
+    setCleanupOrphan: 'cleanup_orphan',
+    setMinToTray: 'minimize_to_tray',
+    setAutostart: 'autostart',
+    setAutostartCore: 'autostart_core',
+    setStartMin: 'start_minimized',
+  };
+  Object.keys(map).forEach(id => {
+    const el = $(id);
+    if (el) el.checked = !!APP_SETTINGS[map[id]];
+  });
+}
+
+function initSettingsUI() {
+  const btn = $('btnSettings');
+  if (btn) btn.addEventListener('click', () => {
+    const d = $('setDrawer');
+    if (d && d.classList.contains('open')) closeSettings();
+    else openSettings('page');
+  });
+
+  const close = $('btnSetClose');
+  if (close) close.addEventListener('click', closeSettings);
+
+  // 左侧导航
+  document.querySelectorAll('#setNav .nav-item').forEach(b => {
+    b.addEventListener('click', () => switchSettingsPane(b.dataset.pane));
+  });
+
+  // 打开目录
+  const od = $('btnOpenDir');
+  if (od) od.addEventListener('click', () => lightAction('btnOpenDir', openDir, '打开目录'));
+
+  // 设置开关
+  const map = {
+    setStopOnExit: 'stop_core_on_exit',
+    setConfirmExit: 'confirm_on_exit',
+    setCleanupOrphan: 'cleanup_orphan',
+    setMinToTray: 'minimize_to_tray',
+    setAutostartCore: 'autostart_core',
+    setStartMin: 'start_minimized',
+  };
+  Object.keys(map).forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      saveAppSettings({ [map[id]]: el.checked });
+    });
+  });
+
+  // 自启开关要调后端
+  const autoEl = $('setAutostart');
+  if (autoEl) {
+    autoEl.addEventListener('change', async () => {
+      const on = autoEl.checked;
+      try {
+        const j = await api('/api/autostart', {
+          method: 'POST',
+          body: JSON.stringify({ enable: on }),
+        });
+        if (!j.ok) throw new Error(j.message || '设置失败');
+        await saveAppSettings({ autostart: on });
+        toast(on ? '已开启开机自启' : '已关闭开机自启', 'ok');
+      } catch (e) {
+        toast('设置开机自启失败: ' + e.message, 'err');
+        autoEl.checked = !on;
+      }
+    });
+  }
+
+  // 孤儿检测 / 清理
+  const chk = $('btnCheckOrphan');
+  if (chk) {
+    chk.addEventListener('click', async () => {
+      try {
+        const j = await api('/api/orphan_check');
+        if (!j.ok) throw new Error('检测失败');
+        const n = (j.data.orphans || []).length;
+        toast(n > 0 ? `发现 ${n} 个残留核心进程` : '没有发现残留进程', n > 0 ? 'err' : 'ok');
+      } catch (e) {
+        toast('检测失败: ' + e.message, 'err');
+      }
+    });
+  }
+  ['btnCleanOrphan2', 'btnCleanOrphan'].forEach(id => {
+    const b = $(id);
+    if (b) b.addEventListener('click', async () => {
+      await runOrphanCleanup(false);
+      await refreshOrphanBar();
+    });
+  });
+
+  // Esc 关闭设置（但不关闭其他已打开的弹窗）
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    const d = $('setDrawer');
+    if (d && d.classList.contains('open')) {
+      const anyModal = ['chartModal', 'detailModal', 'exitModal']
+        .some(m => $(m) && $(m).classList.contains('open'));
+      if (!anyModal) closeSettings();
+    }
+  });
+}
+
+/* ---------------- 模态框通用关闭 ---------------- */
+
+function initModalClose() {
+  document.querySelectorAll('[data-close]').forEach(el => {
+    el.addEventListener('click', () => {
+      const t = el.dataset.close;
+      const m = $(t + 'Modal');
+      if (m) m.classList.remove('open');
+    });
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    ['chartModal', 'detailModal'].forEach(id => {
+      const m = $(id);
+      if (m && m.classList.contains('open')) m.classList.remove('open');
+    });
+  });
+}
+
+/* ---------------- 孤儿提示条 ---------------- */
+
+async function refreshOrphanBar() {
+  const bar = $('orphanBar');
+  if (!bar) return;
+  try {
+    const j = await api('/api/orphan_check');
+    if (!j.ok) return;
+    const n = (j.data.orphans || []).length;
+    if (n > 0) {
+      $('orphanCount').textContent = n;
+      bar.style.display = 'flex';
+    } else {
+      bar.style.display = 'none';
+    }
+  } catch (_) {
+    bar.style.display = 'none';
+  }
+}
+
+/* ---------------- 打开目录 ---------------- */
+
+async function openDir() {
+  try {
+    const j = await api('/api/open_dir', { method: 'POST' });
+    if (j.ok) toast('已打开程序目录');
   } catch (e) {
-    $('cfgMsg').textContent = '校验失败';
-    toast((e.message || String(e)).slice(0, 300), 'err');
-  } finally {
-    setBtnLoading('btnCfgSave', false);
+    toast('打开目录失败: ' + e.message, 'err');
   }
 }
 
 /* ---------------- 初始化 ---------------- */
 
 async function init() {
-  // 主题要最先应用，避免首屏闪一下深色
+  // 主题最先应用，避免首屏闪
   initTheme();
 
-  // 对等节点表格的交互（排序 / 列设置 / 搜索 / 复制）
+  // 页面模块
+  loadModules();
+  applyModules();
+  renderModList();
+
+  // 对等节点表格交互
   initPeerTable();
   initColPanel();
   initPeerSearch();
   renderColList();
   renderPeerHead();
 
+  // 拓扑
+  initTopoControls();
+  initModalClose();
+  initChartUI();
+  initDetailUI();
+  initLogUI();
+  initConfigUI();
+  initSettingsUI();
+
+  // 应用设置 + 退出确认
+  await loadSettings();
+  initExitConfirm();
+  listenExitRequest();
+
+  // 元信息
   try {
     const j = await api('/api/meta');
     if (j.ok) {
       REFRESH_MS = j.data.refresh_interval_ms || 2000;
-      $('pathHint').textContent = '配置：' + j.data.config_path;
-      // 开机自启当前状态
-      $('chkAutostart').checked = !!j.data.autostart;
-      // 权限提示：非管理员时显示警告条
+      const ph = $('pathHint');
+      if (ph) ph.textContent = '配置：' + j.data.config_path;
+      const rp = $('rawPath');
+      if (rp) rp.textContent = j.data.config_path || '';
+      const lp = $('logPath');
+      if (lp) lp.textContent = 'logs\\easytier-runtime.log';
+
       if (j.data.elevated === false) {
         $('permWarning').style.display = 'flex';
       }
+      if (j.data.autostart !== undefined) {
+        APP_SETTINGS.autostart = !!j.data.autostart;
+      }
+      syncSettingsUI();
     }
-  } catch { /* 忽略 */ }
+  } catch (_) {}
 
-  $('btnStart').onclick = () => action('/api/start', '启动', {
+  // 按钮
+  const btnStart = $('btnStart');
+  if (btnStart) btnStart.onclick = () => action('/api/start', '启动', {
     btnId: 'btnStart',
     busyTitle: '正在启动核心…',
-    busyDesc: '创建虚拟网卡、连接对等节点，通常需要 2~5 秒'
+    busyDesc: '创建虚拟网卡、连接对等节点，通常需要 2~5 秒',
   });
 
-  $('btnStop').onclick = () => action('/api/stop', '停止', {
+  const btnStop = $('btnStop');
+  if (btnStop) btnStop.onclick = () => action('/api/stop', '停止', {
     btnId: 'btnStop',
     busyTitle: '正在停止核心…',
-    busyDesc: '清理虚拟网卡并释放端口'
+    busyDesc: '清理虚拟网卡并释放端口',
   });
 
-  $('btnRestart').onclick = () => action('/api/restart', '重启', {
+  const btnRestart = $('btnRestart');
+  if (btnRestart) btnRestart.onclick = () => action('/api/restart', '重启', {
     btnId: 'btnRestart',
     busyTitle: '正在重启核心…',
-    busyDesc: '先停止再重新创建虚拟网卡，约需 4~8 秒'
+    busyDesc: '先停止再重新创建虚拟网卡，约需 4~8 秒',
   });
 
-  // 刷新：只转圈，不遮挡界面
-  $('btnRefresh').onclick = () => lightAction('btnRefresh', refresh, '刷新');
+  const btnRefresh = $('btnRefresh');
+  if (btnRefresh) btnRefresh.onclick = () => lightAction('btnRefresh', refresh, '刷新');
 
-  $('btnLog').onclick = () => { openDrawer('运行日志', 'log'); loadLog(); };
-  $('btnCfg').onclick = openConfig;
-
-  // 打开目录：只转圈（系统对话框可能卡一两秒）
-  $('btnOpenDir').onclick = () => lightAction('btnOpenDir', openDir, '打开目录');
-
-  // 开机自启开关
-  $('chkAutostart').onchange = async (e) => {
-    const on = e.target.checked;
-    e.target.disabled = true;
-    setBadgeBusy(on ? '正在开启自启…' : '正在关闭自启…');
-    // 操作期间暂停轮询，避免徽章被刷新打断
-    if (timer) { clearInterval(timer); timer = null; }
-    try {
-      if (!IS_TAURI) throw new Error('该功能仅在桌面版可用');
-      const msg = await invokeCmd('set_autostart', { enable: on });
-      toast(msg.split('\n')[0], 'ok');
-      e.target.checked = on;
-    } catch (err) {
-      toast('设置失败: ' + (err.message || err), 'err');
-      e.target.checked = !on;   // 回滚
-    } finally {
-      e.target.disabled = false;
-      // 先解除徽章的 busy 锁，再刷新——否则 renderStatus 的守卫
-      // 会把这次刷新跳过，徽章就永久卡在「正在开启自启…」
-      clearBadgeBusy();
-      await refresh().catch(() => {});
-      startPolling();
-    }
-  };
-
-  $('btnDrawerClose').onclick = closeDrawer;
-  $('btnDrawerRefresh').onclick = () => {
-    if (drawerMode === 'log') lightAction('btnDrawerRefresh', loadLog, '刷新日志');
-  };
-  $('btnModalClose').onclick = closeConfig;
-
-  $('btnCfgSave').onclick = saveConfig;
-  $('overlay').onclick = () => { closeDrawer(); closeConfig(); };
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { closeDrawer(); closeConfig(); }
-  });
-
+  // 首次加载
   await refresh();
   startPolling();
+
+  // 延迟检查孤儿（不阻塞首屏）
+  setTimeout(refreshOrphanBar, 1200);
+
+  // 启动时自动连核心
+  if (APP_SETTINGS.autostart_core) {
+    setTimeout(() => {
+      if (lastStatus && !lastStatus.running) {
+        action('/api/start', '启动', {
+          btnId: 'btnStart',
+          busyTitle: '正在启动核心…',
+          busyDesc: '启动时自动连接已开启',
+        });
+      }
+    }, 800);
+  }
 }
 
-/* ---------------- 打开程序目录 ---------------- */
-
-async function openDir() {
-  if (!IS_TAURI) {
-    toast('该功能仅在桌面版可用', 'err');
-    return;
-  }
-  try {
-    await invokeCmd('open_dir');
-  } catch (e) {
-    toast('打开目录失败: ' + (e.message || e), 'err');
-  }
-}
-
-init();
+document.addEventListener('DOMContentLoaded', init);

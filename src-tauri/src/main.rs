@@ -8,6 +8,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod settings;
+mod history;
+
+// Tauri 2 的 emit / app_handle 需要通过 trait 引入
+use tauri::{Emitter, Manager};
+
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
@@ -40,7 +46,7 @@ const RPC_PORTAL: &str = "127.0.0.1:15888";
 // easytier-core.exe / easytier-cli.exe 等文件自动归位到 resource/。
 
 /// 程序根目录（exe 所在目录）。开发态回退到当前工作目录。
-fn root_dir() -> PathBuf {
+pub(crate) fn root_dir() -> PathBuf {
     if let Ok(p) = std::env::current_exe() {
         if let Some(parent) = p.parent() {
             return parent.to_path_buf();
@@ -136,14 +142,14 @@ fn migrate_legacy_files() {
 // ---------------------------------------------------------------- 工具函数
 
 #[cfg(target_os = "windows")]
-fn hidden_cmd(prog: &Path) -> Command {
+pub(crate) fn hidden_cmd(prog: &Path) -> Command {
     let mut c = Command::new(prog);
     c.creation_flags(CREATE_NO_WINDOW);
     c
 }
 
 #[cfg(not(target_os = "windows"))]
-fn hidden_cmd(prog: &Path) -> Command {
+pub(crate) fn hidden_cmd(prog: &Path) -> Command {
     Command::new(prog)
 }
 
@@ -166,7 +172,7 @@ fn run_cli(args: &[&str]) -> Result<String, String> {
 }
 
 /// 执行 easytier-cli -o json 并解析
-fn cli_json(args: &[&str]) -> Result<Value, String> {
+pub(crate) fn cli_json(args: &[&str]) -> Result<Value, String> {
     let mut a = vec!["-o", "json"];
     a.extend_from_slice(args);
     let s = run_cli(&a)?;
@@ -181,7 +187,7 @@ fn cli_json(args: &[&str]) -> Result<Value, String> {
 ///
 /// 直接查系统进程，这样即使用户用别的方式（服务、手动）启动过
 /// easytier-core，面板也能正确识别。
-fn core_running() -> bool {
+pub(crate) fn core_running() -> bool {
     #[cfg(target_os = "windows")]
     {
         let out = hidden_cmd(Path::new("tasklist"))
@@ -587,7 +593,7 @@ fn start_core() -> Result<String, String> {
             "需要管理员权限才能启动核心。\n\n\
              原因：EasyTier 通过 wintun 驱动创建虚拟网卡，\
              这需要加载内核驱动并修改网络配置，普通权限会失败。\n\n\
-             解决：关闭本窗口，右键 EasyTier-Console.exe → \
+             解决：关闭本窗口，右键 easytier-console.exe → \
              「以管理员身份运行」。"
                 .into(),
         );
@@ -1041,7 +1047,273 @@ fn get_meta() -> Value {
         "platform": std::env::consts::OS,
         "autostart": autostart_enabled(),
         "elevated": is_elevated(),
+        "settings": settings::load_settings(),
     })
+}
+
+// ---------------------------------------------------------------- 应用设置
+//
+// 面板自身行为偏好，与组网配置（config.toml）分开存放。
+
+#[tauri::command]
+fn get_settings() -> settings::AppSettings {
+    settings::load_settings()
+}
+
+#[tauri::command]
+fn save_settings(s: settings::AppSettings) -> Result<(), String> {
+    settings::save_settings(&s)
+}
+
+/// 手动扫描并清理孤儿核心进程，返回被清理的 PID。
+///
+/// 为什么需要手动触发：
+///   启动时自动清理可能因为权限、wmic 不可用而失败，
+///   用户升级遇到「文件使用中」时可以点一下这个按钮再试。
+#[tauri::command]
+fn cleanup_orphan() -> Result<Value, String> {
+    let before = {
+        #[cfg(target_os = "windows")]
+        {
+            settings::find_orphans().len()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            0
+        }
+    };
+    let killed = settings::cleanup_orphan_cores();
+    Ok(serde_json::json!({
+        "found": before,
+        "killed": killed,
+    }))
+}
+
+/// 查询是否存在孤儿核心（供前端提示用，不执行清理）
+#[tauri::command]
+fn check_orphan() -> Value {
+    #[cfg(target_os = "windows")]
+    {
+        let cores = settings::list_cores();
+        let orphans = settings::find_orphans();
+        serde_json::json!({
+            "total_cores": cores.len(),
+            "orphans": orphans.iter().map(|o| serde_json::json!({
+                "pid": o.pid,
+                "ppid": o.ppid,
+            })).collect::<Vec<_>>(),
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        serde_json::json!({ "total_cores": 0, "orphans": [] })
+    }
+}
+
+/// 真正退出程序（由前端确认框调用）
+///
+/// stop: true  → 先停核心再退出
+/// stop: false → 只退面板，核心继续在后台跑
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle, stop: bool) {
+    if stop {
+        let _ = stop_core();
+    }
+    app.exit(0);
+}
+
+// ---------------------------------------------------------------- 延迟历史
+
+/// 查询某节点的延迟历史
+#[tauri::command]
+fn latency_history(node: String, minutes: Option<u32>) -> Result<Value, String> {
+    let mins = minutes.unwrap_or(1440);
+    let pts = history::query_history(&node, mins, 360)?;
+    Ok(serde_json::json!(pts))
+}
+
+/// 节点历史统计（最小/平均/最大）
+#[tauri::command]
+fn latency_stats(node: String, minutes: Option<u32>) -> Result<Value, String> {
+    let mins = minutes.unwrap_or(60);
+    let (mn, avg, mx) = history::stats(&node, mins)?;
+    Ok(serde_json::json!({ "min": mn, "avg": avg, "max": mx }))
+}
+
+// ---------------------------------------------------------------- 节点详情
+
+/// 获取单个节点的完整信息
+///
+/// 按需查询，不放进 2 秒的主轮询——否则每轮都要跑 peer-center + route
+/// 两个 CLI，会明显拖慢界面。
+#[tauri::command]
+fn peer_detail(id: String) -> Result<Value, String> {
+    if !core_running() {
+        return Err("核心未运行".into());
+    }
+
+    // 1) 基础信息：peer
+    let peers = cli_json(&["peer"]).unwrap_or(Value::Array(vec![]));
+    let arr = peers.as_array().cloned().unwrap_or_default();
+    let p = arr
+        .iter()
+        .find(|x| {
+            let host = x.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
+            let pid = x
+                .get("id")
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default();
+            host == id || pid == id
+        })
+        .cloned();
+
+    let p = match p {
+        Some(v) => v,
+        None => return Err(format!("未找到节点 {id}")),
+    };
+
+    // 2) 路径信息：route
+    let routes = cli_json(&["route"]).unwrap_or(Value::Array(vec![]));
+    let route = routes
+        .as_array()
+        .and_then(|rs| {
+            rs.iter()
+                .find(|r| {
+                    r.get("hostname").and_then(|v| v.as_str())
+                        == p.get("hostname").and_then(|v| v.as_str())
+                })
+                .cloned()
+        })
+        .unwrap_or(Value::Null);
+
+    // 3) 邻居拓扑：peer-center
+    let centers = cli_json(&["peer-center"]).unwrap_or(Value::Array(vec![]));
+    let neighbors: Vec<Value> = centers
+        .as_array()
+        .map(|cs| {
+            cs.iter()
+                .filter(|c| {
+                    c.get("hostname").and_then(|v| v.as_str())
+                        == p.get("hostname").and_then(|v| v.as_str())
+                })
+                .flat_map(|c| {
+                    c.get("direct_peers")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 4) 历史统计
+    let host = p.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
+    let (mn, avg, mx) = history::stats(host, 60).unwrap_or((None, None, None));
+
+    Ok(serde_json::json!({
+        "hostname": p.get("hostname").cloned().unwrap_or(Value::Null),
+        "ipv4": p.get("ipv4").cloned().unwrap_or(Value::Null),
+        "cidr": p.get("cidr").cloned().unwrap_or(Value::Null),
+        "peer_id": p.get("id").cloned().unwrap_or(Value::Null),
+        "cost": p.get("cost").cloned().unwrap_or(Value::Null),
+        "kind": match p.get("cost").and_then(|v| v.as_str()) {
+            Some("Local") => "local",
+            Some(c) if c.starts_with("relay") => "relay",
+            _ => "p2p",
+        },
+        "tunnel_proto": p.get("tunnel_proto").cloned().unwrap_or(Value::Null),
+        "nat_label": p.get("nat_type").cloned().unwrap_or(Value::Null),
+        "version": p.get("version").cloned().unwrap_or(Value::Null),
+        "lat": p.get("lat_ms").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()),
+        "loss": p.get("loss_rate").and_then(|v| v.as_str())
+            .map(|s| s.trim_end_matches('%')).and_then(|s| s.parse::<f64>().ok()),
+        "rx": p.get("rx_bytes").cloned().unwrap_or(Value::Null),
+        "tx": p.get("tx_bytes").cloned().unwrap_or(Value::Null),
+        "route": route,
+        "neighbors": neighbors,
+        "min1h": mn,
+        "avg1h": avg,
+        "max1h": mx,
+    }))
+}
+
+// ---------------------------------------------------------------- 程序日志
+
+fn app_log_file() -> PathBuf {
+    logs_dir().join("console.log")
+}
+
+/// 面板自身的操作日志
+///
+/// 与核心日志分开的意义：
+///   用户说「点了启动没反应」时，只有核心日志看不出
+///   是面板没调用成功，还是 core 起不来。有了程序日志就能区分。
+pub(crate) fn app_log(msg: &str) {
+    let path = app_log_file();
+    let ts = {
+        let secs = now_ms() / 1000;
+        // 简单格式化本地时间（不引 chrono）
+        format_ts(secs)
+    };
+    let line = format!("{ts} {msg}\n");
+    // 超过 2MB 就截断，避免无限增长
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 2 * 1024 * 1024 {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// 秒级时间戳转 `YYYY-MM-DD HH:MM:SS`（本地时区近似，用 UTC 偏移）
+fn format_ts(secs: u64) -> String {
+    // 简化实现：只做到「月-日 时:分:秒」，够排查用
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let s = rem % 60;
+    // 从 1970-01-01 起算日期
+    let mut y = 1970i64;
+    let mut d = days as i64;
+    loop {
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let yd = if leap { 366 } else { 365 };
+        if d < yd {
+            break;
+        }
+        d -= yd;
+        y += 1;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let mdays = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut mo = 0usize;
+    while mo < 12 && d >= mdays[mo] {
+        d -= mdays[mo];
+        mo += 1;
+    }
+    format!("{y:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        mo + 1, d + 1, h, m, s)
+}
+
+/// 读取程序日志
+#[tauri::command]
+fn tail_app_log(lines: Option<usize>) -> Result<String, String> {
+    let p = app_log_file();
+    if !p.exists() {
+        return Ok(String::new());
+    }
+    let content = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+    let n = lines.unwrap_or(400);
+    let all: Vec<&str> = content.lines().collect();
+    let start = all.len().saturating_sub(n);
+    Ok(all[start..].join("\n"))
 }
 
 // ---------------------------------------------------------------- 开机自启
@@ -1059,7 +1331,7 @@ fn get_meta() -> Value {
 // Linux 方案：~/.config/autostart/*.desktop（freedesktop 标准）
 
 // 启动文件夹里的快捷方式名（纯 ASCII，避免中文路径在部分环境下出问题）
-const AUTOSTART_NAME: &str = "EasyTier Console";
+const AUTOSTART_NAME: &str = "easytier-console";
 
 /// 用户启动文件夹路径（Windows）
 #[cfg(target_os = "windows")]
@@ -1451,6 +1723,60 @@ fn run_selftest() -> i32 {
     }
 
     match cmd {
+        "spawn-orphan" => {
+            /* 测试专用：用 DETACHED 启动 core 后立刻退出，
+               人为制造「父进程已消失的孤儿」场景。
+               只用于验证孤儿清理逻辑，不参与正式流程。 */
+            println!("--- 制造孤儿核心（测试用）---");
+            match spawn_core_once() {
+                Ok(()) => {
+                    println!("  已用 DETACHED 启动 core，本进程即将退出");
+                    println!("  3 秒后 core 的父进程将不存在 → 成为孤儿");
+                }
+                Err(e) => {
+                    println!("  [FAIL] 启动失败: {e}");
+                    fail += 1;
+                }
+            }
+            println!();
+        }
+        "orphan" => {
+            println!("--- 孤儿核心检测 ---");
+            #[cfg(target_os = "windows")]
+            {
+                let cores = settings::list_cores();
+                println!("  发现 easytier-core 进程: {} 个", cores.len());
+                for c in &cores {
+                    println!("    PID={} PPID={}", c.pid, c.ppid);
+                }
+                let orphans = settings::find_orphans();
+                println!("  判定为孤儿: {} 个", orphans.len());
+                for o in &orphans {
+                    println!("    待清理 PID={} (父进程 {} 已退出)", o.pid, o.ppid);
+                }
+                if orphans.is_empty() && !cores.is_empty() {
+                    println!("  ✅ 无孤儿（核心的父进程都还活着，不会误杀）");
+                } else if orphans.is_empty() {
+                    println!("  ✅ 当前没有核心进程在跑");
+                } else {
+                    println!("  ⚠️ 存在 {} 个孤儿，启动时会自动清理", orphans.len());
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                println!("  仅 Windows 支持");
+            }
+            println!();
+        }
+        "settings" => {
+            println!("--- 应用设置 ---");
+            let s = settings::load_settings();
+            println!("  {}", serde_json::to_string_pretty(&s).unwrap_or_default());
+            let p = root_dir().join("data").join("settings.json");
+            println!("  存储位置: {}", p.display());
+            println!("  文件存在: {}", p.exists());
+            println!();
+        }
         "config" | "all" => {
             println!("--- read_config() ---");
             match read_config() {
@@ -1600,13 +1926,63 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             setup_tray(app)?;
+
+            /* 启动时清理孤儿核心
+             *
+             * 这是解决「覆盖升级提示文件使用中」的关键：
+             * 上次面板被强杀/断电时，DETACHED 的 core 会成为孤儿，
+             * 一直占着 resource/easytier-core.exe 和 wintun.dll。
+             *
+             * 放到独立线程里跑，不阻塞窗口显示——
+             * PowerShell 查询进程表可能要几百毫秒。
+             */
+            let s = settings::load_settings();
+            if s.cleanup_orphan {
+                std::thread::spawn(|| {
+                    let killed = settings::cleanup_orphan_cores();
+                    if !killed.is_empty() {
+                        eprintln!("[startup] 已清理孤儿核心: {:?}", killed);
+                    }
+                });
+            }
+
+            // 延迟历史采样（每 5 秒一次，独立线程）
+            history::start_sampler();
+            app_log("面板启动 version=1.1.1");
+
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 点窗口关闭按钮时：不退出，改为隐藏到托盘
+            /* 关闭窗口的处理有四种路径，按设置决定走哪条：
+             *
+             *   1) confirm_on_exit = true  → 不直接关，通知前端弹确认框
+             *   2) stop_core_on_exit = true → 停核心 + 真退出
+             *   3) minimize_to_tray = true  → 只隐藏窗口，核心继续跑
+             *   4) 都不满足                 → 直接退出（保留核心）
+             *
+             * 为什么默认是「隐藏到托盘」：
+             *   这是组网工具，用户点 × 通常只是不想看界面，
+             *   不是想断网。真要退出有托盘菜单和设置里的开关。
+             */
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // 只有当托盘创建成功时才拦截关闭
-                if TRAY_READY.load(std::sync::atomic::Ordering::SeqCst) {
+                let s = settings::load_settings();
+
+                // 路径 1：交给前端弹窗询问
+                if s.confirm_on_exit {
+                    api.prevent_close();
+                    let _ = window.emit("ask-exit", ());
+                    return;
+                }
+
+                // 路径 2：停止核心并退出
+                if s.stop_core_on_exit {
+                    let _ = stop_core();
+                    window.app_handle().exit(0);
+                    return;
+                }
+
+                // 路径 3：仅最小化到托盘
+                if s.minimize_to_tray && TRAY_READY.load(std::sync::atomic::Ordering::SeqCst) {
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -1625,6 +2001,15 @@ fn main() {
             open_dir,
             tray_quit,
             show_window,
+            get_settings,
+            save_settings,
+            cleanup_orphan,
+            check_orphan,
+            quit_app,
+            latency_history,
+            latency_stats,
+            peer_detail,
+            tail_app_log,
         ])
         .run(tauri::generate_context!())
         .expect("EasyTier 控制台启动失败");

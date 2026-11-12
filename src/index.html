@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EasyTier 控制台</title>
+<title>easytier-console</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -11,17 +11,17 @@
 <!-- ============ 顶部栏 ============ -->
 <header class="topbar">
   <div class="brand">
-    <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-      <circle cx="12" cy="12" r="2.5"/>
-      <circle cx="4" cy="6" r="2"/>
-      <circle cx="20" cy="6" r="2"/>
-      <circle cx="4" cy="18" r="2"/>
-      <circle cx="20" cy="18" r="2"/>
-      <path d="M6 7l4.2 3.6M18 7l-4.2 3.6M6 17l4.2-3.6M18 17l-4.2-3.6"/>
+    <svg class="logo" viewBox="0 0 48 48">
+      <circle cx="24" cy="24" r="19" fill="none" stroke="currentColor" stroke-width="2.6" opacity=".35"/>
+      <circle cx="24" cy="24" r="9" fill="none" stroke="currentColor" stroke-width="2.6"/>
+      <circle cx="24" cy="24" r="3.4" fill="currentColor"/>
+      <circle cx="24" cy="5" r="3.4" fill="currentColor"/>
+      <circle cx="42" cy="34" r="3.4" fill="currentColor"/>
+      <circle cx="6" cy="34" r="3.4" fill="currentColor"/>
     </svg>
     <div>
-      <h1>EasyTier</h1>
-      <p class="sub">网络控制台</p>
+      <h1>easytier-console</h1>
+      <p class="sub" id="nodeSub">未连接</p>
     </div>
   </div>
 
@@ -30,33 +30,27 @@
       <span class="dot"></span><span id="connText">检测中</span>
     </div>
     <div class="actions">
-      <!-- 主题切换：下拉选择，含多套配色 -->
-      <div class="theme-wrap">
-        <button id="btnTheme" class="btn btn-ico-only btn-has-ico" title="切换主题">
-          <span class="btn-ico" id="themeIco"></span>
-        </button>
-        <div class="panel theme-panel" id="themePanel">
-          <div class="panel-head">
-            <span class="t">主题</span>
-            <span class="h">选择配色</span>
-          </div>
-          <div class="panel-body" id="themeList"></div>
-        </div>
-      </div>
-      <button id="btnStart"  class="btn btn-primary" title="启动 EasyTier 核心">
+      <button id="btnStart" class="btn btn-primary" title="启动 EasyTier 核心">
         <span class="btn-ico"></span><span class="btn-txt">启动</span>
       </button>
-      <button id="btnStop"   class="btn btn-danger"  title="停止 EasyTier 核心">
+      <button id="btnStop" class="btn btn-danger" title="停止 EasyTier 核心">
         <span class="btn-ico"></span><span class="btn-txt">停止</span>
       </button>
       <button id="btnRestart" class="btn" title="重启核心">
         <span class="btn-ico"></span><span class="btn-txt">重启</span>
       </button>
+      <button id="btnSettings" class="btn btn-ico-only btn-has-ico" title="设置">
+        <span class="btn-ico">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/>
+          </svg>
+        </span>
+      </button>
     </div>
   </div>
 </header>
 
-<!-- 全局操作遮罩：长操作时显示 -->
+<!-- 全局操作遮罩 -->
 <div id="busyOverlay" class="busy-overlay">
   <div class="busy-box">
     <div class="busy-spinner"></div>
@@ -65,8 +59,7 @@
   </div>
 </div>
 
-
-<!-- 权限警告条：非管理员时显示 -->
+<!-- 权限警告条 -->
 <div id="permWarning" class="perm-warning" style="display:none">
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
     <path d="M12 9v4M12 17h.01"/>
@@ -74,14 +67,27 @@
   </svg>
   <div class="perm-text">
     <strong>未以管理员身份运行</strong>
-    <span>EasyTier 创建虚拟网卡需要管理员权限，当前点「启动」会失败。请关闭本窗口，右键 <code>EasyTier-Console.exe</code> → 以管理员身份运行。</span>
+    <span>EasyTier 创建虚拟网卡需要管理员权限，当前点「启动」会失败。请关闭本窗口，右键 <code>easytier-console.exe</code> → 以管理员身份运行。</span>
   </div>
 </div>
 
-<main class="container">
+<!-- 孤儿核心提示条 -->
+<div id="orphanBar" class="orphan-bar" style="display:none">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    <path d="M12 9v4M12 17h.01"/>
+    <path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/>
+  </svg>
+  <div class="orphan-text">
+    <strong>检测到 <span id="orphanCount">0</span> 个残留核心进程</strong>
+    <span>它们没有面板在管理，会一直占用程序文件，导致升级时提示「文件使用中」。</span>
+  </div>
+  <button id="btnCleanOrphan" class="btn btn-sm">立即清理</button>
+</div>
 
-  <!-- ============ 本节点 ============ -->
-  <section class="card">
+<!-- ============ 主内容：模块容器（顺序由页面设置决定） ============ -->
+<main class="container" id="moduleContainer">
+
+  <section class="card" data-mod="node">
     <div class="card-head">
       <h2>本节点</h2>
       <span id="nodeVersion" class="tag"></span>
@@ -91,15 +97,12 @@
     </div>
   </section>
 
-  <!-- ============ 对等节点 ============ -->
-  <section class="card">
+  <section class="card" data-mod="peers">
     <div class="card-head">
       <h2>对等节点</h2>
       <div class="head-right">
         <span id="peerCount" class="tag">0 个</span>
         <span id="abnormalTag" class="tag tag-warn" style="display:none">0 个异常</span>
-
-        <!-- 搜索 -->
         <div class="search" id="searchBox">
           <span class="s-ico">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -109,10 +112,9 @@
           <input type="search" id="searchInput" placeholder="搜索主机名 / IP" autocomplete="off">
           <button class="s-clear" id="btnSearchClear" title="清空">✕</button>
         </div>
-
-        <button id="btnRefresh" class="btn btn-sm" title="立即刷新"><span class="btn-ico"></span><span class="btn-txt">刷新</span></button>
-
-        <!-- 列设置 -->
+        <button id="btnRefresh" class="btn btn-sm" title="立即刷新">
+          <span class="btn-ico"></span><span class="btn-txt">刷新</span>
+        </button>
         <div class="col-wrap">
           <button class="btn btn-sm btn-col btn-has-ico" id="btnCol" title="调整列的显示与顺序">
             <span class="btn-ico">
@@ -125,14 +127,9 @@
             <span class="col-count" id="colCount"></span>
           </button>
           <div class="panel" id="colPanel">
-            <div class="panel-head">
-              <span class="t">列设置</span>
-              <span class="h">拖动排序</span>
-            </div>
+            <div class="panel-head"><span class="t">列设置</span><span class="h">拖动排序</span></div>
             <div class="panel-body" id="colList"></div>
-            <div class="panel-foot">
-              <button class="btn btn-sm" id="btnColReset">恢复默认</button>
-            </div>
+            <div class="panel-foot"><button class="btn btn-sm" id="btnColReset">恢复默认</button></div>
           </div>
         </div>
       </div>
@@ -141,25 +138,59 @@
       <span><i class="sw sw-p2p"></i>直连</span>
       <span><i class="sw sw-relay"></i>中转</span>
       <span><i class="sw sw-local"></i>本机</span>
-      <span class="legend-hint">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M3 17l5-5 4 4 8-9"/>
-        </svg>
-        延迟列右侧为最近 30 次采样趋势
-      </span>
+      <span class="legend-hint">点击行看详情 · 点击延迟曲线看趋势</span>
     </div>
     <div class="table-wrap" id="peerTableWrap">
       <table id="peerTable">
         <thead id="peerHead"></thead>
-        <tbody id="peerBody">
-          <tr><td colspan="10" class="empty">暂无数据</td></tr>
-        </tbody>
+        <tbody id="peerBody"><tr><td colspan="10" class="empty">暂无数据</td></tr></tbody>
       </table>
     </div>
   </section>
 
-  <!-- ============ 子网代理 ============ -->
-  <section class="card">
+  <section class="card" data-mod="topo">
+    <div class="card-head">
+      <h2>网络拓扑</h2>
+      <div class="head-right">
+        <span id="topoNodeCount" class="tag">0 节点</span>
+        <span id="topoEdgeCount" class="tag tag-accent">0 连接</span>
+      </div>
+    </div>
+    <div class="topo-toolbar">
+      <div class="mini-seg" id="topoViewSeg">
+        <button class="on" data-v="star">星型</button>
+        <button data-v="mesh">全互联</button>
+      </div>
+      <div class="mini-seg" id="topoLayoutSeg">
+        <button data-l="radial">分层环形</button>
+        <button class="on" data-l="circle">平铺环形</button>
+      </div>
+      <label class="chk"><input type="checkbox" id="cbTopoLat" checked> 延迟</label>
+      <label class="chk"><input type="checkbox" id="cbTopoTraffic"> 流量</label>
+      <button id="btnTopoReset" class="btn btn-sm" style="margin-left:auto">重置布局</button>
+    </div>
+    <div class="topo-canvas" id="topoCanvas">
+      <div class="topo-grid"></div>
+      <svg id="topoSvg"></svg>
+      <div class="topo-tip" id="topoTip"></div>
+      <div class="topo-empty" id="topoEmpty" style="display:none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>
+        </svg>
+        <span>核心未运行，暂无拓扑数据</span>
+      </div>
+    </div>
+    <div class="topo-legend">
+      <span class="it"><i class="ln" style="border-color:var(--green)"></i>直连</span>
+      <span class="it"><i class="ln dash" style="border-color:var(--orange)"></i>经中转</span>
+      <span class="it"><i class="nd-dot" style="border-color:var(--brand);background:var(--brand-soft)"></i>本机</span>
+      <span class="it"><i class="nd-dot" style="border-color:var(--green);background:var(--green-bg)"></i>正常</span>
+      <span class="it"><i class="nd-dot" style="border-color:var(--orange);background:var(--orange-bg)"></i>异常</span>
+      <span class="topo-hint">悬停高亮 · 拖动调整位置</span>
+    </div>
+  </section>
+
+  <section class="card" data-mod="proxy">
     <div class="card-head">
       <h2>子网代理</h2>
       <div class="head-right">
@@ -172,26 +203,20 @@
     </div>
   </section>
 
-  <!-- ============ 路由表 ============ -->
-  <section class="card">
-    <div class="card-head">
-      <h2>路由表</h2>
-      <span id="routeCount" class="tag">0 条</span>
-    </div>
+  <section class="card" data-mod="routes">
+    <div class="card-head"><h2>路由表</h2><span id="routeCount" class="tag">0 条</span></div>
     <div class="table-wrap">
       <table>
-        <thead>
-          <tr><th>节点</th><th>虚拟 IP</th><th class="num">跳数</th><th class="num">路径延迟</th><th>下一跳</th><th>可访问网段</th></tr>
-        </thead>
-        <tbody id="routeBody">
-          <tr><td colspan="6" class="empty">暂无路由</td></tr>
-        </tbody>
+        <thead><tr>
+          <th>节点</th><th>虚拟 IP</th><th class="num">跳数</th>
+          <th class="num">路径延迟</th><th>下一跳</th><th>可访问网段</th>
+        </tr></thead>
+        <tbody id="routeBody"><tr><td colspan="6" class="empty">暂无路由</td></tr></tbody>
       </table>
     </div>
   </section>
 
-  <!-- ============ 端口转发 ============ -->
-  <section class="card">
+  <section class="card" data-mod="forwards">
     <div class="card-head">
       <h2>端口转发</h2>
       <div class="head-right">
@@ -204,73 +229,301 @@
     </div>
   </section>
 
-  <!-- ============ 活跃转发连接 ============ -->
-  <section class="card">
-    <div class="card-head">
-      <h2>活跃转发连接</h2>
-      <span id="activeCount" class="tag">0 条</span>
-    </div>
+  <section class="card" data-mod="active">
+    <div class="card-head"><h2>活跃转发连接</h2><span id="activeCount" class="tag">0 条</span></div>
     <div class="table-wrap">
       <table>
-        <thead>
-          <tr><th>来源</th><th></th><th>目标</th><th>协议</th><th>状态</th><th>所属规则</th><th>建立时间</th></tr>
-        </thead>
-        <tbody id="activeBody">
-          <tr><td colspan="7" class="empty">暂无活跃连接</td></tr>
-        </tbody>
+        <thead><tr>
+          <th>来源</th><th></th><th>目标</th><th>协议</th><th>状态</th><th>所属规则</th><th>建立时间</th>
+        </tr></thead>
+        <tbody id="activeBody"><tr><td colspan="7" class="empty">暂无活跃连接</td></tr></tbody>
       </table>
-    </div>
-  </section>
-
-  <!-- ============ 操作区 ============ -->
-  <section class="card">
-    <div class="card-head"><h2>操作</h2></div>
-    <div class="op-row">
-      <button id="btnLog"  class="btn"><span class="btn-ico"></span><span class="btn-txt">查看日志</span></button>
-      <button id="btnCfg"  class="btn"><span class="btn-ico"></span><span class="btn-txt">编辑配置</span></button>
-      <button id="btnOpenDir" class="btn"><span class="btn-ico"></span><span class="btn-txt">打开目录</span></button>
-
-      <div class="op-sep"></div>
-
-      <label class="switch-wrap" title="开机自动启动本面板">
-        <input type="checkbox" id="chkAutostart">
-        <span class="switch"></span>
-        <span class="switch-label">开机自启</span>
-      </label>
-    </div>
-    <div class="path-line">
-      <span class="muted small" id="pathHint"></span>
     </div>
   </section>
 
 </main>
 
-<!-- ============ 日志抽屉 ============ -->
-<div id="drawer" class="drawer">
+<!-- ============ 设置抽屉 ============ -->
+<aside class="drawer set-drawer" id="setDrawer">
   <div class="drawer-head">
-    <h3 id="drawerTitle">日志</h3>
-    <div class="drawer-actions">
-      <button id="btnDrawerRefresh" class="btn btn-sm"><span class="btn-ico"></span><span class="btn-txt">刷新</span></button>
-      <button id="btnDrawerClose" class="btn btn-sm">关闭</button>
+    <h3>设置</h3>
+    <div class="head-tools">
+      <button class="icon-btn" id="btnOpenDir" title="打开程序目录">
+        <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+      </button>
+      <button class="icon-btn" id="btnSetClose" title="关闭">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
     </div>
   </div>
-  <pre id="drawerBody" class="drawer-body"></pre>
-</div>
-<div id="overlay" class="overlay"></div>
 
-<!-- ============ 配置编辑弹窗 ============ -->
-<div id="modal" class="modal">
-  <div class="modal-box">
-    <div class="modal-head">
-      <h3>编辑配置 <code>config.toml</code></h3>
-      <button id="btnModalClose" class="btn btn-sm">关闭</button>
+  <div class="drawer-body">
+    <nav class="side-nav" id="setNav">
+      <button class="nav-item" data-pane="theme">
+        <span class="ni"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/></svg></span>主题
+      </button>
+      <button class="nav-item on" data-pane="page">
+        <span class="ni"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="6" rx="1.5"/><rect x="3" y="12" width="18" height="4" rx="1.5"/><rect x="3" y="19" width="12" height="2" rx="1"/></svg></span>页面
+      </button>
+      <button class="nav-item" data-pane="behavior">
+        <span class="ni"><svg viewBox="0 0 24 24"><path d="M13 2L4.5 13H11l-1 9 8.5-11H12z"/></svg></span>启动与退出
+      </button>
+      <button class="nav-item" data-pane="config">
+        <span class="ni"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg></span>配置
+      </button>
+      <button class="nav-item" data-pane="log">
+        <span class="ni"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg></span>日志
+      </button>
+    </nav>
+
+    <div class="pane" data-pane="theme">
+      <div class="pane-title">主题</div>
+      <div class="pane-desc">6 套配色。均已调校语义色，切换后延迟、告警等状态色仍可准确辨识。</div>
+      <div class="theme-grid" id="themeGrid"></div>
     </div>
-    <textarea id="cfgText" spellcheck="false"></textarea>
-    <div class="modal-foot">
-      <span id="cfgMsg" class="muted small"></span>
-      <div>
-        <button id="btnCfgSave" class="btn btn-primary"><span class="btn-ico"></span><span class="btn-txt">校验并保存</span></button>
+
+    <div class="pane on" data-pane="page">
+      <div class="pane-title">页面</div>
+      <div class="pane-desc">勾选决定是否显示，拖动 ⣿ 调整位置，名称可直接编辑。改动即时生效并自动保存。</div>
+      <div class="mod-list" id="modList"></div>
+      <div class="mod-tip">
+        至少保留一个模块可见，否则页面会空白。名称留空则恢复默认。<br>
+        改过的名称会同时显示在这个列表里，避免混淆。
       </div>
+    </div>
+
+    <div class="pane" data-pane="behavior">
+      <div class="pane-title">启动与退出</div>
+      <div class="pane-desc">控制窗口行为，以及关闭面板时是否连带停止 EasyTier 核心。</div>
+
+      <div class="note">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+        <div>EasyTier 核心是<b>独立进程</b>，默认与面板分离运行（面板崩溃不影响组网）。
+          若要「关面板就一起退出」，打开下面的开关。</div>
+      </div>
+
+      <div class="field-row">
+        <div class="fl">
+          <div class="t">关闭面板时同时停止核心</div>
+          <div class="d">关闭窗口或退出时自动停止 easytier-core 并释放虚拟网卡</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setStopOnExit"><span class="track"></span></label>
+      </div>
+      <div class="field-row">
+        <div class="fl">
+          <div class="t">退出前二次确认</div>
+          <div class="d">弹窗询问「停止核心 / 仅退面板」，避免误关断网</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setConfirmExit"><span class="track"></span></label>
+      </div>
+      <div class="field-row">
+        <div class="fl">
+          <div class="t">启动时清理残留核心</div>
+          <div class="d">检测上次异常退出遗留的孤儿进程，解决「文件使用中」无法覆盖</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setCleanupOrphan"><span class="track"></span></label>
+      </div>
+      <div class="field-row">
+        <div class="fl">
+          <div class="t">关闭窗口时最小化到托盘</div>
+          <div class="d">关闭按钮只隐藏窗口，核心继续在后台运行</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMinToTray"><span class="track"></span></label>
+      </div>
+      <div class="field-row">
+        <div class="fl">
+          <div class="t">开机自动启动面板</div>
+          <div class="d">登录 Windows 后自动打开控制台</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutostart"><span class="track"></span></label>
+      </div>
+      <div class="field-row">
+        <div class="fl">
+          <div class="t">启动时自动连接核心</div>
+          <div class="d">打开程序后立即启动核心（需管理员权限）</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutostartCore"><span class="track"></span></label>
+      </div>
+      <div class="field-row">
+        <div class="fl">
+          <div class="t">启动时最小化</div>
+          <div class="d">开机自启时不弹窗，直接驻留托盘</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setStartMin"><span class="track"></span></label>
+      </div>
+
+      <div class="set-actions">
+        <button class="btn btn-sm" id="btnCheckOrphan">检测残留核心</button>
+        <button class="btn btn-sm" id="btnCleanOrphan2">立即清理</button>
+      </div>
+      <div class="path-line">
+        <span class="muted small" id="pathHint"></span>
+      </div>
+    </div>
+
+    <div class="pane" data-pane="config">
+      <div class="pane-title">配置</div>
+      <div class="pane-desc">表单方式编辑常用项，无需了解 TOML。复杂配置可切「高级」或「原始配置」。</div>
+
+      <div class="cfg-tabs" id="cfgTabs">
+        <button class="cfg-tab on" data-t="basic">基础</button>
+        <button class="cfg-tab" data-t="network">网络</button>
+        <button class="cfg-tab" data-t="pf">端口转发</button>
+        <button class="cfg-tab" data-t="adv">高级</button>
+        <button class="cfg-tab" data-t="raw">原始配置</button>
+      </div>
+
+      <div class="cfg-pane" data-t="basic" id="cfgBasic"></div>
+      <div class="cfg-pane hide" data-t="network" id="cfgNetwork"></div>
+      <div class="cfg-pane hide" data-t="pf" id="cfgPf"></div>
+      <div class="cfg-pane hide" data-t="adv" id="cfgAdv"></div>
+      <div class="cfg-pane hide" data-t="raw">
+        <div class="raw-warn">
+          <svg viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>
+          <div>直接编辑会<b>绕过表单校验</b>。保存前仍做 TOML 语法与关键字段检查，但字段语义需自行保证。</div>
+        </div>
+        <div class="raw-meta">
+          <span class="mono small muted" id="rawPath"></span>
+          <div class="raw-acts">
+            <button class="btn btn-sm" id="btnRawCopy">复制全文</button>
+            <button class="btn btn-sm" id="btnRawReload">重新载入</button>
+          </div>
+        </div>
+        <textarea id="rawArea" class="raw-area" spellcheck="false"></textarea>
+        <div class="raw-foot"><span class="muted small" id="rawMsg">未修改</span></div>
+      </div>
+
+      <div class="cfg-foot">
+        <span class="msg" id="cfgMsg"></span>
+        <div class="acts">
+          <button class="btn btn-sm" id="btnCfgReload">重新载入</button>
+          <button class="btn btn-primary btn-sm" id="btnCfgSave">校验并保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="pane" data-pane="log">
+      <div class="pane-title">日志</div>
+      <div class="pane-desc">
+        <b>核心日志</b>＝easytier-core 自己输出（组网、握手、建卡），排查连不上看它。
+        <b>程序日志</b>＝面板操作记录（启停、配置保存），排查「点了没反应」看它。
+      </div>
+      <div class="log-toolbar">
+        <div class="mini-seg" id="logSeg">
+          <button class="on" data-l="core">核心日志</button>
+          <button data-l="app">程序日志</button>
+        </div>
+        <div class="mini-seg" id="logLevelSeg">
+          <button class="on" data-lv="all">全部</button>
+          <button data-lv="warn">警告+</button>
+          <button data-lv="error">错误</button>
+        </div>
+        <label class="chk"><input type="checkbox" id="cbLogAuto" checked> 自动滚动</label>
+        <button class="btn btn-sm" id="btnLogRefresh" style="margin-left:auto">
+          <span class="btn-ico"></span><span class="btn-txt">刷新</span>
+        </button>
+      </div>
+      <pre class="log-view" id="logView"></pre>
+      <div class="log-foot">
+        <span class="mono small muted" id="logPath"></span>
+        <button class="btn btn-sm" id="btnLogDir">打开日志目录</button>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<!-- ============ 延迟趋势大图 ============ -->
+<div id="chartModal" class="modal">
+  <div class="modal-mask" data-close="chart"></div>
+  <div class="modal-box chart-box">
+    <div class="modal-head">
+      <h3><span id="chartTitle">节点</span> <span class="sub">延迟趋势</span></h3>
+      <button class="icon-btn" data-close="chart">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="chart-toolbar">
+        <div class="mini-seg" id="rangeSeg">
+          <button data-r="60">1 小时</button>
+          <button data-r="360">6 小时</button>
+          <button data-r="1440" class="on">24 小时</button>
+        </div>
+        <div class="mini-seg" id="metricSeg">
+          <button data-m="lat" class="on">延迟</button>
+          <button data-m="loss">丢包</button>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <svg class="chart-svg" id="bigChart" viewBox="0 0 760 220" preserveAspectRatio="none"></svg>
+        <div class="ctip" id="chartTip">
+          <div class="ct-t" id="chartTipT">--:--</div>
+          <div class="ct-v"><b id="chartTipV">--</b> <span id="chartTipU">ms</span></div>
+        </div>
+      </div>
+      <div class="chart-legend">
+        <span class="it"><i style="background:var(--brand)"></i>延迟</span>
+        <span class="it"><i style="background:var(--orange)"></i>平均</span>
+        <span class="ch-hint">每 5 秒采样，按分钟聚合显示</span>
+      </div>
+      <div class="stat-row" id="chartStats">
+        <div class="stat min"><div class="k">最小</div><div class="v">—</div></div>
+        <div class="stat"><div class="k">平均</div><div class="v">—</div></div>
+        <div class="stat max"><div class="k">最大</div><div class="v">—</div></div>
+        <div class="stat loss"><div class="k">丢包率</div><div class="v">—</div></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-sm" id="btnChartCsv">导出 CSV</button>
+      <button class="btn btn-sm" data-close="chart">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 节点详情 ============ -->
+<div id="detailModal" class="modal">
+  <div class="modal-mask" data-close="detail"></div>
+  <div class="modal-box detail-box">
+    <div class="modal-head">
+      <h3><span id="detailTitle">节点</span> <span class="sub">详情</span></h3>
+      <button class="icon-btn" data-close="detail">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-body" id="detailBody">
+      <div class="detail-loading">正在读取节点信息…</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-sm" id="btnDetailCopy">复制全部信息</button>
+      <button class="btn btn-primary btn-sm" data-close="detail">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 退出确认 ============ -->
+<div id="exitModal" class="modal modal-confirm">
+  <div class="modal-box confirm-box">
+    <div class="modal-head"><h3>退出 easytier-console</h3></div>
+    <div class="confirm-body">
+      <p class="confirm-q">要停止 EasyTier 核心吗？</p>
+      <div class="confirm-opts">
+        <div class="confirm-opt" data-act="stop">
+          <div class="co-t">停止核心并退出</div>
+          <div class="co-d">网络断开，虚拟网卡被移除。下次需要重新启动核心。</div>
+        </div>
+        <div class="confirm-opt" data-act="keep">
+          <div class="co-t">仅退出面板（推荐）</div>
+          <div class="co-d">核心继续在后台运行，组网不中断。下次打开面板可直接接管。</div>
+        </div>
+      </div>
+      <label class="confirm-remember">
+        <input type="checkbox" id="chkExitRemember">
+        <span>记住我的选择，下次不再询问</span>
+      </label>
+      <p class="confirm-tip" id="exitOrphanTip" style="display:none"></p>
+    </div>
+    <div class="modal-foot">
+      <button id="btnExitCancel" class="btn">取消</button>
     </div>
   </div>
 </div>
