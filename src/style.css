@@ -393,7 +393,7 @@ code,pre,.mono{font-family:"Cascadia Code","Consolas","JetBrains Mono",monospace
   white-space:nowrap;
 }
 .muted{color:var(--txt-mute)}
-.small{font-size:12px}
+.small{font-size:11.5px}
 
 /* ============ 本节点：自适应网格 ============ */
 .node-grid{
@@ -685,7 +685,6 @@ td.empty{text-align:center;padding:26px;color:var(--txt-mute)}
 
 /* ============ 操作行 ============ */
 .op-row{display:flex;align-items:center;gap:10px;padding:14px 18px 8px;flex-wrap:wrap}
-.path-line{padding:0 18px 12px}
 
 /* 竖直分隔线 */
 .op-sep{
@@ -694,14 +693,20 @@ td.empty{text-align:center;padding:26px;color:var(--txt-mute)}
   margin:0 4px;
 }
 
-/* 开关 */
+/* 开关（旧版 switch-wrap 结构）
+ *
+ * 注意：所有选择器必须限定在 .switch-wrap 内。
+ * 否则 `.switch{...}` 会命中新版 `<label class="switch">`
+ * 结构，导致旧 ::after 圆点与新 .track::after 圆点叠加，
+ * 开关显示成两个错位的球。
+ */
 .switch-wrap{
   display:inline-flex;align-items:center;gap:9px;
   cursor:pointer;user-select:none;
   padding:4px 2px;
 }
 .switch-wrap input{position:absolute;opacity:0;width:0;height:0}
-.switch{
+.switch-wrap .switch{
   position:relative;
   width:38px;height:21px;
   background:#2a3542;
@@ -710,7 +715,7 @@ td.empty{text-align:center;padding:26px;color:var(--txt-mute)}
   transition:.2s;
   flex:0 0 auto;
 }
-.switch::after{
+.switch-wrap .switch::after{
   content:'';
   position:absolute;top:2px;left:2px;
   width:15px;height:15px;
@@ -751,11 +756,26 @@ td.empty{text-align:center;padding:26px;color:var(--txt-mute)}
 }
 .drawer-head h3{font-size:13.5px;font-weight:600}
 .drawer-actions{display:flex;gap:8px}
+/* 抽屉正文容器有两种用途，必须分开写：
+ *   1) 日志抽屉：直接放文本，需要内边距 + 等宽换行
+ *   2) 设置抽屉：里面是 side-nav + pane，绝不能有内边距
+ *      —— 否则侧栏被推进去、pane 被挤窄，视觉上「间隙全错」
+ * 之前两条规则都命中 .drawer-body，padding 叠加导致排版错乱。
+ */
 .drawer-body{
-  flex:1;overflow:auto;padding:14px 18px;
+  flex:1;min-height:0;overflow:auto;
   font-size:12px;line-height:1.65;color:var(--txt-dim);
   white-space:pre-wrap;word-break:break-all;
   background:var(--bg);
+}
+/* 设置抽屉：横向 flex 布局，去掉内边距与换行设置 */
+.set-drawer .drawer-body{
+  display:flex;
+  padding:0;
+  white-space:normal;
+  word-break:normal;
+  overflow:hidden;
+  background:transparent;
 }
 
 /* ============ 遮罩 ============ */
@@ -797,6 +817,21 @@ td.empty{text-align:center;padding:26px;color:var(--txt-mute)}
 .modal-foot{
   display:flex;align-items:center;justify-content:space-between;
   padding:12px 18px;
+}
+
+/* 弹窗正文：必须显式给内边距并允许内部滚动
+ *
+ * 之前完全没有 .modal-body 规则，导致：
+ *   · 内容紧贴弹窗左右边缘（截图里「基本信息」顶到边框）
+ *   · 内容超高时不滚动，而是把弹窗撑破、底部按钮被挤出视口
+ * flex:1 + min-height:0 是让它在 flex 列容器里正确收缩的关键，
+ * 少了 min-height:0，flex 子项的最小高度是内容高度，仍会溢出。
+ */
+.modal-body{
+  flex:1;
+  min-height:0;
+  overflow-y:auto;
+  padding:16px 20px 18px;
 }
 
 /* ============ Toast ============ */
@@ -868,9 +903,34 @@ tr:hover .ip-copy{opacity:.6}
 .ip-cell:hover{color:var(--brand)}
 
 /* ---------- 延迟 + sparkline ---------- */
-.lat-cell{display:inline-flex;align-items:center;gap:8px;justify-content:flex-end;width:100%}
+.lat-cell{display:inline-flex;align-items:center;gap:6px;justify-content:flex-end;width:100%}
 .lat-val{min-width:56px;text-align:right}
 .spark{width:44px;height:15px;flex:0 0 auto;opacity:.9;overflow:visible}
+.spark-empty{color:var(--txt-mute)}
+
+/* sparkline 点击热区
+ *
+ * 曲线只有 44x15，直接点命中率很低。
+ * 热区向外扩 4px 内边距并用负 margin 抵消，
+ * 视觉尺寸不变但可点击面积明显变大。
+ */
+.spark-hit{
+  display:inline-flex;align-items:center;justify-content:center;
+  padding:4px 5px;margin:-4px -5px;
+  border-radius:5px;cursor:pointer;
+  transition:background .13s;
+}
+.spark-hit:hover{background:var(--brand-soft)}
+.spark-hit:hover .spark{opacity:1}
+.spark-hit:active{transform:scale(.96)}
+
+/* 整行可点击看详情 */
+tr.row-click{cursor:pointer}
+tr.row-click:hover td{background:var(--row-hover)}
+tr.row-click:active td{background:var(--brand-soft)}
+
+/* 本机行上的 spark-hit（本机没有趋势，不显示热区） */
+tr.local-row .spark-hit{display:none}
 
 /* ---------- 异常行标记 ---------- */
 tr.abnormal-row td:first-child{box-shadow:inset 3px 0 0 var(--orange)}
@@ -950,12 +1010,12 @@ tr.local-row:hover{background:var(--brand-soft)}
   will-change:transform;
 }
 .col-item:hover{background:var(--bg-hover)}
-.grip{
+.col-item .grip{
   width:12px;flex:0 0 auto;color:var(--txt-mute);
   font-size:10px;line-height:1;letter-spacing:-1px;
   cursor:grab;padding:2px 0;
 }
-.grip:active{cursor:grabbing}
+.col-item .grip:active{cursor:grabbing}
 .cb,
 .col-item .name,
 .col-item .lock,
@@ -1090,7 +1150,6 @@ tr.local-row:hover{background:var(--brand-soft)}
 }
 
 /* 设置里的操作按钮行 */
-.set-actions{display:flex;gap:7px;margin-top:4px}
 
 /* ============================================================
  * v1.1.1 新增组件样式
@@ -1101,7 +1160,6 @@ tr.local-row:hover{background:var(--brand-soft)}
 .tag-accent{background:var(--brand-soft);color:var(--brand);border-color:rgba(59,130,246,.3)}
 .tag-warn{background:var(--orange-bg);color:var(--orange);border-color:rgba(245,158,11,.3)}
 .tag-ok{background:var(--green-bg);color:var(--green);border-color:rgba(34,197,94,.3)}
-.small{font-size:11px}
 .dirty-dot{width:5px;height:5px;border-radius:50%;background:var(--orange);
   display:inline-block;margin-right:3px;vertical-align:middle}
 
@@ -1119,8 +1177,6 @@ tr.local-row:hover{background:var(--brand-soft)}
 .orphan-text strong span{color:var(--orange)}
 
 /* ---------- 图标按钮 ---------- */
-.btn-ico-only{padding:7px 9px}
-.btn-ico-only .btn-ico{width:15px;height:15px}
 .btn-has-ico .btn-ico{display:inline-flex;align-items:center;justify-content:center;
   border:0;animation:none;opacity:1}
 .btn-has-ico .btn-ico svg{width:100%;height:100%;display:block}
@@ -1209,61 +1265,91 @@ tr.local-row:hover{background:var(--brand-soft)}
 .icon-btn svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:2;
   stroke-linecap:round;stroke-linejoin:round}
 
-.drawer-body{display:flex;flex:1;min-height:0}
-.side-nav{width:154px;flex:0 0 auto;padding:8px 6px;
+.side-nav{width:160px;flex:0 0 auto;padding:10px 8px;
   border-right:1px solid var(--line-soft);display:flex;flex-direction:column;
-  gap:2px;overflow-y:auto}
-.nav-item{display:flex;align-items:center;gap:7px;padding:7px 9px;border-radius:7px;
-  font-size:11.5px;color:var(--txt-dim);cursor:pointer;transition:.13s;
+  gap:3px;overflow-y:auto}.nav-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:7px;
+  font-size:12.5px;color:var(--txt-dim);cursor:pointer;transition:.13s;
   border:0;background:transparent;font-family:inherit;text-align:left;width:100%}
 .nav-item:hover{background:var(--bg-hover);color:var(--txt)}
 .nav-item.on{background:var(--brand-soft);color:var(--brand);font-weight:600}
-.nav-item .ni{width:12px;height:12px;flex:0 0 auto}
+.nav-item .ni{width:13px;height:13px;flex:0 0 auto}
 .nav-item .ni svg{width:100%;height:100%;fill:none;stroke:currentColor;
   stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
 
-.pane{flex:1;min-width:0;overflow-y:auto;padding:15px 19px 24px;display:none}
+.pane{flex:1;min-width:0;overflow-y:auto;padding:18px 22px 26px;display:none}
 .pane.on{display:block}
-.pane-title{font-size:12.5px;font-weight:650;margin-bottom:3px}
-.pane-desc{font-size:10.5px;color:var(--txt-mute);margin-bottom:13px;line-height:1.6}
-.pane-desc b{color:var(--txt-dim)}
+.pane-title{font-size:14px;font-weight:650;line-height:1.4;margin-bottom:4px}
+.pane-desc{font-size:11.5px;color:var(--txt-mute);margin-bottom:16px;line-height:1.7}
+.pane-desc b{color:var(--txt-dim);font-weight:600}
 
-.field-row{display:flex;align-items:center;justify-content:space-between;gap:14px;
-  padding:9px 0;border-bottom:1px solid var(--line-soft)}
+/* 设置项行
+ *
+ * 间距配比说明：
+ *   行内 padding 11px 上下 + 主标题 12.5px + 副标题 11px，
+ *   一行约 46px 高，符合「可点区域够大、信息不挤」的密度。
+ *   副标题与主标题间距 2px，行与行之间用 1px 分隔线，
+ *   不再额外加 margin——之前是 padding 9 + 无 margin，
+ *   但字号只有 11.5/10，导致文字挤、留白多，看着像间距错了。
+ */
+.field-row{display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:11px 0;border-bottom:1px solid var(--line-soft);min-height:44px}
 .field-row:last-of-type{border-bottom:0}
-.field-row .fl .t{font-size:11.5px;color:var(--txt);display:flex;align-items:center;gap:5px}
-.field-row .fl .d{font-size:10px;color:var(--txt-mute);margin-top:1px;line-height:1.5}
+.field-row .fl{min-width:0;flex:1}
+.field-row .fl .t{font-size:12.5px;color:var(--txt);display:flex;align-items:center;gap:5px;
+  line-height:1.5}
+.field-row .fl .d{font-size:11px;color:var(--txt-mute);margin-top:2px;line-height:1.55}
+/* 开关后面留出固定视觉呼吸，避免贴到右边缘 */
+.field-row .switch{margin-right:1px}
 
-.switch{position:relative;width:34px;height:19px;flex:0 0 auto;cursor:pointer}
-.switch input{display:none}
-.switch .track{position:absolute;inset:0;border-radius:10px;
-  background:var(--line);transition:.18s}
-.switch .track::after{content:'';position:absolute;width:13px;height:13px;
-  border-radius:50%;background:#fff;top:3px;left:3px;transition:.18s;
-  box-shadow:0 1px 3px rgba(0,0,0,.3)}
+/* 开关（新版 <label class="switch"><input><span class="track">）
+ *
+ * 尺寸 40x22，圆点 16，行程 18。之前 34x19 的点只有 13px，
+ * 加上旧 .switch::after 规则残留，视觉上会看到两个球错位。
+ * 现在旧规则已收进 .switch-wrap 作用域，这里可以安全定义。
+ */
+.switch{position:relative;width:40px;height:22px;flex:0 0 auto;cursor:pointer;
+  display:inline-block}
+.switch input{position:absolute;opacity:0;width:0;height:0;pointer-events:none}
+.switch .track{position:absolute;inset:0;border-radius:11px;
+  background:var(--line);transition:background .18s;
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.06)}
+.switch .track::after{content:'';position:absolute;width:16px;height:16px;
+  border-radius:50%;background:#fff;top:3px;left:3px;transition:transform .18s;
+  box-shadow:0 1px 3px rgba(0,0,0,.28)}
 .switch input:checked + .track{background:var(--brand)}
-.switch input:checked + .track::after{transform:translateX(15px)}
+.switch input:checked + .track::after{transform:translateX(18px)}
+.switch input:focus-visible + .track{box-shadow:0 0 0 3px var(--brand-soft)}
+.switch:hover .track{filter:brightness(1.06)}
+.switch input:disabled + .track{opacity:.45;cursor:not-allowed}
 
-.note{display:flex;gap:8px;padding:9px 11px;border-radius:7px;
+/* 详情里的「不适用」与下一跳语义色 */
+.na{color:var(--txt-mute);font-style:normal;font-size:10.5px;
+  padding:0 5px;border-radius:4px;background:var(--gray-bg)}
+.hop-direct{color:var(--green)}
+.hop-self{color:var(--brand)}
+.hop-mid{color:var(--orange);font-weight:600}
+
+.note{display:flex;gap:9px;padding:10px 12px;border-radius:8px;
   background:var(--brand-soft);border:1px solid rgba(59,130,246,.24);
-  font-size:10.5px;line-height:1.65;color:var(--txt-dim);margin-bottom:12px}
-.note svg{width:13px;height:13px;flex:0 0 auto;margin-top:1px;fill:none;
+  font-size:11.5px;line-height:1.7;color:var(--txt-dim);margin-bottom:14px}
+.note svg{width:14px;height:14px;flex:0 0 auto;margin-top:2px;fill:none;
   stroke:var(--brand);stroke-width:2;stroke-linecap:round}
 .note b{color:var(--txt)}
 .note.warn{background:var(--orange-bg);border-color:rgba(245,158,11,.3)}
 .note.warn svg{stroke:var(--orange)}
-.set-actions{display:flex;gap:7px;margin-top:12px}
-.path-line{margin-top:10px;padding-top:9px;border-top:1px solid var(--line-soft)}
+.set-actions{display:flex;gap:8px;margin-top:14px}
+.path-line{margin-top:12px;padding-top:10px;border-top:1px solid var(--line-soft)}
+.path-line .small{font-size:11px;line-height:1.6;word-break:break-all}
 
 /* ---------- 页面模块列表 ---------- */
 .mod-list{display:flex;flex-direction:column;gap:3px}
-.mod-item{display:flex;align-items:center;gap:7px;padding:6px 8px;
+.mod-item{display:flex;align-items:center;gap:8px;padding:8px 10px;
   border-radius:7px;background:var(--bg-elev2);border:1px solid var(--line-soft);
   transition:.13s}
 .mod-item:hover{background:var(--bg-hover)}
 .mod-item.off{opacity:.5}
 .mod-item.drag{opacity:.85;background:var(--bg-hover);box-shadow:var(--shadow-sm)}
-.grip{width:11px;flex:0 0 auto;color:var(--txt-mute);font-size:9.5px;
+.mod-item .grip{width:11px;flex:0 0 auto;color:var(--txt-mute);font-size:10px;
   cursor:grab;letter-spacing:-1px;text-align:center}
 .mod-cb{width:13px;height:13px;border-radius:4px;flex:0 0 auto;cursor:pointer;
   border:1.5px solid var(--txt-mute);display:flex;align-items:center;
@@ -1272,10 +1358,10 @@ tr.local-row:hover{background:var(--brand-soft)}
 .mod-cb svg{width:8px;height:8px;fill:none;stroke:#fff;stroke-width:2.8;
   stroke-linecap:round;stroke-linejoin:round;opacity:0;transition:.13s}
 .mod-item.on .mod-cb svg{opacity:1}
-.mod-name{width:76px;flex:0 0 auto;font-size:10.5px;color:var(--txt-mute)}
-.mod-input{flex:1;min-width:0;padding:3px 8px;border-radius:5px;
+.mod-name{width:82px;flex:0 0 auto;font-size:11.5px;color:var(--txt-mute)}
+.mod-input{flex:1;min-width:0;padding:5px 9px;border-radius:6px;
   background:var(--bg);border:1px solid var(--line);color:var(--txt);
-  font-size:11px;font-family:inherit;outline:none;transition:.14s}
+  font-size:11.5px;font-family:inherit;outline:none;transition:.14s}
 .mod-input:focus{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
 .mod-reset{width:21px;height:21px;flex:0 0 auto;border:0;background:transparent;
   color:var(--txt-mute);cursor:pointer;border-radius:5px;
@@ -1283,21 +1369,21 @@ tr.local-row:hover{background:var(--brand-soft)}
 .mod-reset:hover{background:var(--bg-hover);color:var(--brand)}
 .mod-reset svg{width:10px;height:10px;fill:none;stroke:currentColor;
   stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-.mod-tip{font-size:10px;color:var(--txt-mute);margin-top:10px;padding-top:9px;
-  border-top:1px solid var(--line-soft);line-height:1.6}
+.mod-tip{font-size:11px;color:var(--txt-mute);margin-top:12px;padding-top:10px;
+  border-top:1px solid var(--line-soft);line-height:1.65}
 
 /* ---------- 主题网格 ---------- */
-.theme-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:7px}
-.theme-card{padding:8px;border-radius:8px;border:2px solid var(--line);
+.theme-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:9px}
+.theme-card{padding:9px;border-radius:9px;border:2px solid var(--line);
   background:var(--bg-elev2);cursor:pointer;transition:.15s}
 .theme-card:hover{border-color:var(--txt-mute)}
 .theme-card.on{border-color:var(--brand);background:var(--brand-soft)}
-.theme-card .prev{height:36px;border-radius:5px;display:flex;overflow:hidden;
-  border:1px solid var(--line);margin-bottom:6px}
+.theme-card .prev{height:42px;border-radius:6px;display:flex;overflow:hidden;
+  border:1px solid var(--line);margin-bottom:8px}
 .theme-card .prev i{display:block}
 .theme-card .prev i:first-child{width:66%}
 .theme-card .prev i:last-child{width:34%}
-.theme-card .nm{font-size:10.5px;font-weight:600;display:flex;
+.theme-card .nm{font-size:12px;font-weight:600;display:flex;
   align-items:center;gap:4px}
 .theme-card.on .nm{color:var(--brand)}
 .tick{width:9px;height:9px;margin-left:auto;opacity:0}
@@ -1308,41 +1394,56 @@ tr.local-row:hover{background:var(--brand-soft)}
 /* ============================================================
  * 配置表单
  * ============================================================ */
-.cfg-tabs{display:flex;gap:0;border-bottom:1px solid var(--line);
-  margin-bottom:13px;flex-wrap:wrap}
-.cfg-tab{padding:6px 12px;border:0;background:transparent;color:var(--txt-dim);
-  font-size:11px;font-family:inherit;cursor:pointer;
+.cfg-tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);
+  margin-bottom:16px;flex-wrap:wrap}
+.cfg-tab{padding:7px 13px;border:0;background:transparent;color:var(--txt-dim);
+  font-size:12px;font-family:inherit;cursor:pointer;
   border-bottom:2px solid transparent;margin-bottom:-1px;transition:.13s}
 .cfg-tab:hover{color:var(--txt)}
 .cfg-tab.on{color:var(--brand);border-bottom-color:var(--brand);font-weight:600}
 .cfg-pane{display:block}
-.cfg-group{margin-bottom:15px}
-.cfg-group > h5{font-size:10.5px;font-weight:650;color:var(--txt-mute);
-  letter-spacing:.3px;margin-bottom:7px;display:flex;align-items:center;gap:5px;
-  cursor:pointer;user-select:none}
-.cfg-group > h5::before{content:'';width:2px;height:9px;border-radius:1px;
-  background:var(--brand)}
+/* 配置分组
+ *
+ * 之前的间距比例是错的：标题 10.5px 配 15px 组间距，
+ * 视觉上文字很小、空白很大，看起来像「内容没渲染出来」。
+ * 这里把字号抬到 12px、组间距收到 18px，并给分组加左侧色条，
+ * 让「一组」在视觉上聚拢成一个整体。
+ */
+.cfg-group{margin-bottom:18px}
+.cfg-group:last-child{margin-bottom:0}
+.cfg-group > h5{
+  font-size:12px;font-weight:650;color:var(--txt-dim);
+  letter-spacing:.2px;margin-bottom:8px;
+  display:flex;align-items:center;gap:6px;
+  cursor:pointer;user-select:none;
+  padding:2px 0;
+}
+.cfg-group > h5::before{content:'';width:3px;height:11px;border-radius:1.5px;
+  background:var(--brand);flex:0 0 auto}
 .cfg-group > h5 .arrow{margin-left:auto;font-size:9px;color:var(--txt-mute);
-  transition:transform .15s}
+  transition:transform .15s;flex:0 0 auto}
 .cfg-group.folded > h5 .arrow{transform:rotate(-90deg)}
 .cfg-group.folded .cfg-body{display:none}
-.req{font-size:8.5px;padding:0 4px;border-radius:6px;background:var(--red-bg);
+/* 分组正文左缩进，与标题的色条对齐，形成层级感 */
+.cfg-body{padding-left:9px;border-left:1px solid var(--line-soft);margin-left:1px}
+.req{font-size:9px;padding:1px 5px;border-radius:6px;background:var(--red-bg);
   color:var(--red);border:1px solid rgba(239,68,68,.3);font-weight:600}
 
-.cfg-row{display:grid;grid-template-columns:142px 1fr;gap:10px;align-items:center;
-  padding:6px 0;border-bottom:1px solid var(--line-soft)}
+.cfg-row{display:grid;grid-template-columns:130px 1fr;gap:12px;align-items:center;
+  padding:5px 0;border-bottom:1px solid var(--line-soft);min-height:32px}
 .cfg-row:last-child{border-bottom:0}
-.cfg-row .lbl{font-size:10.5px;color:var(--txt-dim);display:flex;
-  align-items:center;gap:3px}
-.cfg-row .lbl .hint{font-size:8.5px;color:var(--txt-mute);cursor:help;
-  border:1px solid var(--line);border-radius:50%;width:11px;height:11px;
-  display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto}
+.cfg-row .lbl{font-size:11.5px;color:var(--txt-dim);display:flex;
+  align-items:center;gap:4px;line-height:1.5}
+.cfg-row .lbl .hint{font-size:9px;color:var(--txt-mute);cursor:help;
+  border:1px solid var(--line);border-radius:50%;width:12px;height:12px;
+  display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
+  line-height:1}
 
-.inp{width:100%;padding:4px 8px;border-radius:5px;background:var(--bg);
-  border:1px solid var(--line);color:var(--txt);font-size:11px;
-  font-family:inherit;outline:none;transition:.14s}
+.inp{width:100%;padding:6px 9px;border-radius:6px;background:var(--bg);
+  border:1px solid var(--line);color:var(--txt);font-size:11.5px;
+  font-family:inherit;outline:none;transition:.14s;line-height:1.5}
 .inp:focus{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
-.inp.mono{font-family:"Cascadia Code",Consolas,monospace;font-size:10.5px}
+.inp.mono{font-family:"Cascadia Code",Consolas,monospace;font-size:11px}
 
 .cfg-secret{display:flex;gap:5px}
 .cfg-secret .inp{flex:1}
@@ -1380,9 +1481,10 @@ tr.local-row:hover{background:var(--brand-soft)}
 .tpl:hover{border-color:var(--brand);color:var(--brand);border-style:solid}
 .empty-hint{padding:14px;text-align:center;color:var(--txt-mute);font-size:11.5px}
 
-.cfg-foot{display:flex;align-items:center;gap:7px;padding-top:11px;margin-top:4px;
-  border-top:1px solid var(--line-soft)}
-.cfg-foot .msg{font-size:10.5px;color:var(--txt-mute)}
+.cfg-foot{display:flex;align-items:center;gap:8px;padding-top:14px;margin-top:18px;
+  border-top:1px solid var(--line-soft);position:sticky;bottom:0;
+  background:var(--bg-elev);z-index:2}
+.cfg-foot .msg{font-size:11px;color:var(--txt-mute)}
 .cfg-foot .acts{margin-left:auto;display:flex;gap:6px}
 
 /* 原始配置 */
@@ -1445,30 +1547,34 @@ tr.local-row:hover{background:var(--brand-soft)}
 /* ============================================================
  * 节点详情
  * ============================================================ */
-.detail-box{max-width:740px}
+.detail-box{max-width:760px}
 .detail-loading{padding:30px;text-align:center;color:var(--txt-mute);font-size:12px}
-.d-sec{margin-bottom:13px}
+.d-sec{margin-bottom:16px}
 .d-sec:last-child{margin-bottom:0}
-.d-sec h4{font-size:10.5px;font-weight:650;color:var(--txt-mute);
-  letter-spacing:.3px;margin-bottom:6px;display:flex;align-items:center;gap:5px}
-.d-sec h4::before{content:'';width:2px;height:9px;border-radius:1px;background:var(--brand)}
-.d-sec h4 .d-sub{font-weight:400;color:var(--txt-mute);font-size:9.5px}
-.d-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));
-  gap:7px 16px;padding:9px 11px;background:var(--bg-elev2);
-  border:1px solid var(--line-soft);border-radius:7px}
-.d-field .k{font-size:9.5px;color:var(--txt-mute);margin-bottom:1px}
-.d-field .v{font-size:11.5px;font-weight:500;word-break:break-all}
-.d-field .v.mono{font-family:Consolas,monospace;font-size:11px}
+.d-sec h4{font-size:11.5px;font-weight:650;color:var(--txt-dim);
+  letter-spacing:.2px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.d-sec h4::before{content:'';width:3px;height:11px;border-radius:1.5px;
+  background:var(--brand);flex:0 0 auto}
+.d-sec h4 .d-sub{font-weight:400;color:var(--txt-mute);font-size:10.5px}
+.d-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));
+  gap:11px 18px;padding:12px 14px;background:var(--bg-elev2);
+  border:1px solid var(--line-soft);border-radius:8px}
+.d-field .k{font-size:10.5px;color:var(--txt-mute);margin-bottom:2px;line-height:1.4}
+.d-field .v{font-size:12.5px;font-weight:500;word-break:break-all;line-height:1.5}
+.d-field .v.mono{font-family:Consolas,monospace;font-size:12px}
 .ver-ok{color:var(--green)}
 .ver-bad{color:var(--orange);font-weight:600}
-.neigh-list{display:flex;flex-direction:column;gap:3px}
-.neigh{display:flex;align-items:center;gap:6px;padding:5px 9px;
-  border-radius:6px;background:var(--bg-elev2);
-  border:1px solid var(--line-soft);font-size:11px}
-.neigh .hn{font-weight:600;min-width:88px}
+.neigh-list{display:flex;flex-direction:column;gap:4px}
+.neigh{display:flex;align-items:center;gap:8px;padding:7px 11px;
+  border-radius:7px;background:var(--bg-elev2);
+  border:1px solid var(--line-soft);font-size:12px}
+.neigh .hn{font-weight:600;min-width:96px}
 .neigh .lat{margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600}
-.mini-chart{height:76px;background:var(--bg-elev2);
-  border:1px solid var(--line-soft);border-radius:7px;padding:6px 8px}
+.mini-chart{height:88px;background:var(--bg-elev2);position:relative;
+  border:1px solid var(--line-soft);border-radius:8px;padding:8px 10px}
+.mini-chart .mc-empty{position:absolute;inset:0;display:flex;
+  align-items:center;justify-content:center;
+  font-size:11px;color:var(--txt-mute);pointer-events:none}
 
 /* ============================================================
  * 退出确认
@@ -1490,3 +1596,47 @@ tr.local-row:hover{background:var(--brand-soft)}
 .confirm-tip{font-size:10.5px;color:var(--orange);line-height:1.55;
   padding:7px 9px;border-radius:7px;background:var(--orange-bg);
   border:1px solid rgba(245,158,11,.28);margin-top:6px}
+
+/* ============================================================
+ * 异常明细弹窗
+ * ============================================================ */
+.abn-box{max-width:660px}
+.abn-empty{padding:34px 20px;text-align:center;color:var(--txt-mute)}
+.abn-empty svg{width:34px;height:34px;color:var(--green);opacity:.8;margin-bottom:9px}
+.abn-empty .t{font-size:13px;font-weight:600;color:var(--txt);margin-bottom:3px}
+.abn-empty .d{font-size:11px}
+
+.abn-card{
+  padding:11px 13px;border-radius:9px;margin-bottom:9px;
+  background:var(--bg-elev2);border:1px solid var(--line-soft);
+  border-left:3px solid var(--orange);
+}
+.abn-card:last-child{margin-bottom:0}
+.abn-head{display:flex;align-items:center;gap:9px;margin-bottom:8px;flex-wrap:wrap}
+.abn-name{font-size:12.5px;font-weight:650;color:var(--txt)}
+.abn-ip{font-size:10.5px;color:var(--txt-dim)}
+.abn-kind{font-size:9.5px;padding:1px 6px;border-radius:5px;
+  background:var(--gray-bg);color:var(--txt-dim)}
+.abn-goto{margin-left:auto}
+
+.abn-reasons{display:flex;flex-direction:column;gap:6px}
+.abn-reason{
+  display:grid;
+  grid-template-columns:7px auto auto auto;
+  grid-template-areas:"dot label value limit" "dot desc desc desc";
+  gap:1px 7px;align-items:center;
+  padding:6px 8px;border-radius:6px;background:var(--bg);
+}
+.abn-dot{grid-area:dot;width:6px;height:6px;border-radius:50%;align-self:start;margin-top:5px}
+.abn-dot.orange{background:var(--orange)}
+.abn-dot.red{background:var(--red)}
+.abn-rl{grid-area:label;font-size:11px;font-weight:600;color:var(--txt)}
+.abn-rv{grid-area:value;font-size:11px;font-weight:650;font-variant-numeric:tabular-nums}
+.abn-rv.orange{color:var(--orange)}
+.abn-rv.red{color:var(--red)}
+.abn-lim{grid-area:limit;font-size:9.5px;color:var(--txt-mute)}
+.abn-rd{grid-area:desc;font-size:10px;color:var(--txt-mute);line-height:1.55}
+
+/* 可点击的标签 */
+.tag-click{cursor:pointer;transition:.13s}
+.tag-click:hover{filter:brightness(1.12);box-shadow:0 0 0 3px var(--orange-bg)}

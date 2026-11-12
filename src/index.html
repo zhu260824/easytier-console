@@ -102,7 +102,8 @@
       <h2>对等节点</h2>
       <div class="head-right">
         <span id="peerCount" class="tag">0 个</span>
-        <span id="abnormalTag" class="tag tag-warn" style="display:none">0 个异常</span>
+        <span id="abnormalTag" class="tag tag-warn tag-click" style="display:none"
+              title="点击查看异常明细">0 个异常</span>
         <div class="search" id="searchBox">
           <span class="s-ico">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -496,6 +497,24 @@
     <div class="modal-foot">
       <button class="btn btn-sm" id="btnDetailCopy">复制全部信息</button>
       <button class="btn btn-primary btn-sm" data-close="detail">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 异常明细 ============ -->
+<div id="abnModal" class="modal">
+  <div class="modal-mask" data-close="abn"></div>
+  <div class="modal-box abn-box">
+    <div class="modal-head">
+      <h3>异常节点明细</h3>
+      <button class="icon-btn" data-close="abn">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-body" id="abnBody"></div>
+    <div class="modal-foot">
+      <span class="muted small">判定阈值：丢包 ≥ 5% · 延迟 ≥ 150ms · 版本与本机不一致</span>
+      <button class="btn btn-primary btn-sm" data-close="abn">关闭</button>
     </div>
   </div>
 </div>

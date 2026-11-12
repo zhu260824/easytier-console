@@ -1,3 +1,75 @@
+# v1.1.2
+
+修复「启动时自动连接核心」「启动时最小化」两项设置存了不生效，以及拓扑空白、配置页报错。
+
+## 修复
+
+**设置项不生效（核心问题）**
+
+- `start_minimized` 完全没有实现，只是存进了 settings.json。
+  现在窗口以 `visible:false` 创建，由 setup 按设置决定显示或驻留托盘。
+- `autostart_core` 只在前端用 `setTimeout(800ms)` 检查 `lastStatus`，
+  首屏状态没回来时这次启动就被丢掉；窗口在托盘时 WebView 被节流更不可靠。
+  已移入后端 setup，用独立线程执行，并在启动前判断核心是否已在运行。
+
+**拓扑图整块空白**
+
+`renderRoutes` 里 `(r.proxy_cidrs || []).length` 后直接调 `.map()`。
+当 `proxy_cidrs` 是逗号分隔字符串时，字符串有 length 但没有 map，
+抛 `TypeError` 中断了 `renderStatus` 后续所有渲染，
+导致末尾的 `topoPeers` 赋值和 `renderTopo()` 被跳过。
+错误又被 `refresh` 的 try/catch 吞掉，因此界面只是「拓扑空白」而无报错。
+
+- 前端统一归一化 `proxy_cidrs`（数组 / 字符串都支持）
+- `renderStatus` 改为各模块独立 `safeRender`，单个模块出错不再拖垮其他模块
+
+**配置页提示 `type is not defined`**
+
+`bindConfigEvents` 里 `const type` 声明在 `handler` 内部，
+但外层绑定事件名时也要用它，作用域取不到 → ReferenceError。
+异常冒泡到 `reloadConfigFromDisk` 的 catch，被显示成「读取配置失败」。
+
+**详情弹窗边距与空数据**
+
+- `.modal-body` 完全没有 padding 规则，内容贴边；
+  补 `flex:1; min-height:0; overflow-y:auto; padding:16px 20px`
+- 本机的延迟/丢包/流量由核心填 `-`，原显示「—」像采集失败，
+  改为「不适用」并加说明（本机不参与链路测量）
+- 后端从未返回 `version_match`，`undefined` 恒假导致所有节点被标「版本不一致」
+- `next_hop_hostname` 的 `DIRECT` / `Local` 内部标记转为中文说明
+
+**对等节点行、延迟曲线、异常标记无法点击**
+
+界面提示「点击行看详情 · 点击延迟曲线看趋势」但只绑定了复制 IP。
+已补齐三级优先级：sparkline > 复制 IP > 行详情。
+新增异常明细弹窗，列出每条异常的原因、实测值、阈值与可能成因，
+并可跳转节点详情。
+
+**开关显示成双圆点**
+
+旧 `.switch::after` 与新 `.switch .track::after` 同时命中
+`<label class="switch">`，两个圆点叠加。旧规则已收进 `.switch-wrap` 作用域。
+
+**设置面板排版错乱**
+
+`.drawer-body` 被日志抽屉与设置抽屉两套规则同时命中，
+padding 叠加把侧栏推进去、内容区挤窄。
+拆分为 `.drawer-body`（日志）与 `.set-drawer .drawer-body`（设置）。
+同时修正字号与间距比例（标题 10.5px 配 15px 间距导致「文字小、空白大」）。
+
+## 新增
+
+- `--selftest full`：8 个分区的一次性全量自检
+  （路径、权限、设置项、自启、核心状态、历史库、日志、孤儿进程）
+- 托盘创建失败时强制显示窗口，避免「双击图标没反应」
+
+## 安全兜底
+
+- 托盘创建失败不再让 setup 返回 Err（原先会导致窗口永不显示）
+- 开启 `start_minimized` 时若托盘不可用，强制显示窗口
+
+---
+
 # v1.1.1
 
 设置面板重构、网络拓扑、配置表单化、延迟历史。

@@ -30,8 +30,20 @@ const RETENTION_SEC: i64 = 24 * 3600;
 /// 清理间隔：1 小时
 const CLEANUP_INTERVAL_SEC: u64 = 3600;
 
-fn db_path() -> PathBuf {
+pub fn db_path() -> PathBuf {
     crate::root_dir().join("data").join("history.db")
+}
+
+/// 采样记录总数（供自检展示，不影响主流程）
+///
+/// 注意不要先 lock 再调 open_db：open_db 内部自己会抢同一把锁，
+/// 造成自死锁（std::sync::Mutex 不可重入）。这里先确保初始化，再单独取锁。
+pub fn sample_count() -> Result<i64, String> {
+    open_db()?;
+    let g = DB.lock().map_err(|_| "数据库锁失败".to_string())?;
+    let conn = g.as_ref().ok_or("数据库未初始化")?;
+    conn.query_row("SELECT COUNT(*) FROM samples", [], |r| r.get(0))
+        .map_err(|e| format!("统计失败: {e}"))
 }
 
 fn now_sec() -> i64 {

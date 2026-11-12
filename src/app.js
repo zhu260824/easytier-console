@@ -402,12 +402,9 @@ function latColor(v) {
 /* 异常判定：丢包 ≥5% / 延迟 ≥150ms / 版本与本机不一致 */
 function isAbnormalPeer(p, myVer) {
   if (p.kind === 'local') return false;
-  const loss = parseFloat(p.loss_rate);
-  const lat = parseFloat(p.lat_ms);
-  if (!isNaN(loss) && loss >= 5) return true;
-  if (!isNaN(lat) && lat >= 150) return true;
-  if (myVer && p.version && p.version !== myVer) return true;
-  return false;
+  // 统一走 abnormalReasons，避免「行标橙条」和「明细弹窗」
+  // 两处判定漂移（比如以后改了阈值只改一处）
+  return abnormalReasons(p, myVer).length > 0;
 }
 
 /* 渲染表头 */
@@ -602,10 +599,23 @@ function renderPeers(d) {
             txt = lat.toFixed(2) + ' ms';
           }
           const hist = latHistory.get(p.hostname || p.id || '?');
-          const spark = (!isLocal && !isNaN(lat)) ? sparkSVG(hist, latColor(lat)) : '';
+          // sparkline 外包一层 .spark-hit 作为点击热区：
+          //   · 曲线本身只有 44x15，直接点很难命中
+          //   · 热区补足内边距，并带节点标识，供大图定位
+          //   · 数据不足 2 点时画一条虚线占位，提示「还没采够」，
+          //     否则这里完全空白，用户不知道能不能点
+          const hasSpark = !isLocal && hist && hist.length >= 2;
+          const sparkInner = hasSpark
+            ? sparkSVG(hist, latColor(lat))
+            : '<svg class="spark spark-empty" viewBox="0 0 44 15" preserveAspectRatio="none">'
+              + '<path d="M2 7.5 H42" stroke="currentColor" stroke-width="1" '
+              + 'stroke-dasharray="2 2" opacity=".35"/></svg>';
+          const hit = isLocal ? '' :
+            `<span class="spark-hit" data-host="${esc(p.hostname || '')}" data-pid="${esc(String(p.id == null ? '' : p.id))}"
+               title="点击查看延迟趋势（1h / 6h / 24h）">${sparkInner}</span>`;
           return `<td class="num ${cls}">
             <span class="lat-cell">
-              <span class="lat-val">${esc(txt || '—')}</span>${spark}
+              <span class="lat-val">${esc(txt || '—')}</span>${hit}
             </span>
           </td>`;
         }
@@ -649,7 +659,10 @@ function renderPeers(d) {
       }
     }).join('');
 
-    return `<tr class="${rowCls}">${cells}</tr>`;
+    // data-host / data-pid 供点击行打开详情用；
+    // 本机也带上，点开能看到本机完整信息（版本、NAT、监听等）
+    const pid = p.id == null ? '' : String(p.id);
+    return `<tr class="${rowCls} row-click" data-host="${esc(p.hostname || '')}" data-pid="${esc(pid)}">${cells}</tr>`;
   }).join('');
 }
 
@@ -903,18 +916,39 @@ function initPeerTable() {
   if (!tb) return;
 
   tb.addEventListener('click', async (e) => {
-    const cell = e.target.closest('.ip-cell');
-    if (!cell) return;
-    const ip = cell.dataset.ip;
-    if (!ip) return;
-    try {
-      await navigator.clipboard.writeText(ip);
-      const old = cell.innerHTML;
-      cell.innerHTML = '<span style="color:var(--green);font-weight:600">已复制</span>';
-      setTimeout(() => { cell.innerHTML = old; }, 1000);
-    } catch (_) {
-      toast('复制失败，请手动选择', 'err');
+    // 1) 点击延迟列的 sparkline → 打开趋势大图
+    //    必须放在行点击之前判断，否则会被行点击抢走
+    const spark = e.target.closest('.spark-hit');
+    if (spark) {
+      e.stopPropagation();
+      const sHost = spark.dataset.host || '';
+      const sId = spark.dataset.pid || '';
+      openLatencyChart(sId || sHost, sHost || sId);
+      return;
     }
+
+    // 2) 点击 IP 单元格 → 复制（原有行为，不触发行详情）
+    const cell = e.target.closest('.ip-cell');
+    if (cell) {
+      const ip = cell.dataset.ip;
+      if (!ip) return;
+      e.stopPropagation();
+      try {
+        await navigator.clipboard.writeText(ip);
+        const old = cell.innerHTML;
+        cell.innerHTML = '<span style="color:var(--green);font-weight:600">已复制</span>';
+        setTimeout(() => { cell.innerHTML = old; }, 1000);
+      } catch (_) {
+        toast('复制失败，请手动选择', 'err');
+      }
+      return;
+    }
+
+    // 3) 点击行任意其他位置 → 打开节点详情
+    const tr = e.target.closest('tr[data-host]');
+    if (!tr) return;
+    // 空状态行没有 data-host，自然不会命中
+    openNodeDetail(tr.dataset.pid || tr.dataset.host);
   });
 }
 
@@ -1289,8 +1323,19 @@ function renderRoutes(d) {
   tb.innerHTML = routes.map(r => {
     const hopCls = r.path_len === 0 ? 'hop-0' : r.path_len === 1 ? 'hop-1' : 'hop-n';
     const hopTxt = r.path_len === 0 ? '本机' : r.path_len + ' 跳';
-    const cidrs = (r.proxy_cidrs || []).length
-      ? `<div class="route-cidrs">${r.proxy_cidrs.map(c => `<span class="route-cidr">${esc(c)}</span>`).join('')}</div>`
+    // proxy_cidrs 有两种来源形态：
+    //   后端已格式化为数组 ["a/24","b/23"]
+    //   原始 CLI 给的是逗号分隔字符串 "a/24, b/23"
+    // 之前的 (x || []).length + x.map() 在字符串上会成立 length
+    // 但没有 map 方法，直接 TypeError，导致后续 renderTopo 被跳过、
+    // 拓扑整块空白。这里统一归一化为数组再渲染。
+    const cidrList = Array.isArray(r.proxy_cidrs)
+      ? r.proxy_cidrs
+      : (typeof r.proxy_cidrs === 'string' && r.proxy_cidrs.trim()
+          ? r.proxy_cidrs.split(',').map(s => s.trim()).filter(Boolean)
+          : []);
+    const cidrs = cidrList.length
+      ? `<div class="route-cidrs">${cidrList.map(c => `<span class="route-cidr">${esc(c)}</span>`).join('')}</div>`
       : '<span class="muted">—</span>';
     const nextHop = r.is_local ? '<span class="muted">本机</span>'
                    : r.is_direct ? '<span style="color:#22c55e">直连</span>'
@@ -2366,9 +2411,12 @@ function bindConfigEvents() {
 
   // 简单字段
   root.querySelectorAll('[data-cfg]').forEach(el => {
+    // type 必须提到 handler 外面：
+    // 下面绑定事件名时也要用（text 用 input 实时响应，其他用 change），
+    // 之前只在 handler 内部声明，导致外层 ReferenceError: type is not defined
+    const type = el.dataset.type;
     const handler = () => {
       const key = el.dataset.cfg;
-      const type = el.dataset.type;
       let v;
       if (type === 'bool') v = el.checked;
       else v = el.value;
@@ -2872,16 +2920,31 @@ async function openNodeDetail(idxOrId) {
   let d = null;
   try {
     const j = await api('/api/peer_detail?id=' + encodeURIComponent(idxOrId));
-    if (j.ok && j.data) d = j.data;
+    // 必须校验「有内容」才算成功：
+    // 后端未实现该方法时可能返回 {} 或 {ok:true,data:{}}，
+    // 若直接采信，renderDetail 会渲染出一堆 "—" 的空壳。
+    if (j.ok && j.data && typeof j.data === 'object'
+        && (j.data.hostname || j.data.peer_id || j.data.kind)) {
+      d = j.data;
+    }
   } catch (_) {}
 
-  // 后端没实现时用当前快照兜底
+  // 后端不可用 / 返回空时用当前快照兜底
   if (!d) {
+    // 快照可能因为刷新时序还没就绪，先主动拉一次，
+    // 否则点击详情会偶发「未找到该节点」。
+    if (!lastStatus || !(lastStatus.peers || []).length) {
+      try {
+        const st = await api('/api/status');
+        if (st.ok && st.data) lastStatus = st.data;
+      } catch (_) {}
+    }
     const peers = (lastStatus && lastStatus.peers) || [];
+    const key = String(idxOrId);
     const p = typeof idxOrId === 'number' ? peers[idxOrId]
-      : peers.find(x => (x.hostname || x.id) === idxOrId);
+      : peers.find(x => String(x.hostname || '') === key || String(x.id) === key);
     if (!p) {
-      if (body) body.innerHTML = '<div class="detail-loading">未找到该节点</div>';
+      if (body) body.innerHTML = '<div class="detail-loading">未找到该节点，可能已离线</div>';
       return;
     }
     d = buildDetailFallback(p, lastStatus);
@@ -2913,7 +2976,11 @@ function buildDetailFallback(p, status) {
     tunnel_proto: p.tunnel_proto || '',
     nat_label: p.nat_label || '',
     version: p.version || '',
+    // 与后端 peer_detail 保持同名字段，否则走 fallback 时
+    // 本机的 lat/loss/rx/tx 会显示成 "—"，看起来像采集失败
     version_match: !myVer || p.version === myVer || p.kind === 'local',
+    my_version: myVer,
+    is_self_ref: p.kind === 'local',
     lat, loss,
     rx: p.rx || p.rx_bytes || '',
     tx: p.tx || p.tx_bytes || '',
@@ -2930,13 +2997,24 @@ function renderDetail(d) {
 
   const kindTxt = d.kind === 'local' ? '本机' : (d.kind === 'relay' ? `经中转（${d.cost || 'relay'}）` : '直连 (p2p)');
   const kindCol = d.kind === 'local' ? 'var(--brand)' : (d.kind === 'relay' ? 'var(--orange)' : 'var(--green)');
-  const latTxt = isNaN(d.lat) ? '—' : d.lat.toFixed(2) + ' ms';
-  const lossTxt = isNaN(d.loss) ? '—' : d.loss.toFixed(1) + '%';
+
+  // 本机自己到自己是「无链路」，lat/loss/流量天然为 "-"。
+  // 直接显示 "—" 会被误读成「读不到数据」，所以换成有说明的文字。
+  const selfRef = d.kind === 'local' || d.is_self_ref === true;
+  const NA = '<span class="na">不适用</span>';
+
+  const latTxt = isNaN(d.lat) ? (selfRef ? NA : '—') : d.lat.toFixed(2) + ' ms';
+  const lossTxt = isNaN(d.loss) ? (selfRef ? NA : '—') : d.loss.toFixed(1) + '%';
   const latCol = isNaN(d.lat) ? 'var(--txt-mute)' : (d.lat < 15 ? 'var(--green)' : d.lat < 50 ? 'var(--txt)' : d.lat < 150 ? 'var(--orange)' : 'var(--red)');
 
+  // 版本：优先用后端算好的 version_match；
+  // 后端老版本不返回该字段时，退化为前端本地比较，避免恒报不一致。
   const verShort = d.version ? String(d.version).split('-')[0] : '';
+  const verMatch = d.version_match !== undefined
+    ? !!d.version_match
+    : (selfRef || !d.my_version || d.version === d.my_version);
   const verHtml = verShort
-    ? `<span class="ver${d.version_match ? ' ver-ok' : ' ver-bad'}">${esc(verShort)}${d.version_match ? ' ✓' : ' ⚠ 与本机不一致'}</span>`
+    ? `<span class="ver${verMatch ? ' ver-ok' : ' ver-bad'}">${esc(verShort)}${verMatch ? ' ✓' : ' ⚠ 与本机不一致'}</span>`
     : '<span class="muted">—</span>';
 
   // 流量合计
@@ -2958,17 +3036,30 @@ function renderDetail(d) {
   const totalB = rxB + txB;
 
   let neighHtml = '';
-  if (d.neighbors && d.neighbors.length) {
+  const neighArr = Array.isArray(d.neighbors) ? d.neighbors : [];
+  if (neighArr.length) {
     neighHtml = `<div class="d-sec">
-      <h4>该节点的直连邻居 <span class="d-sub">来自 peer-center</span></h4>
+      <h4>该节点的直连邻居 <span class="d-sub">共 ${neighArr.length} 个 · 来自 peer-center</span></h4>
       <div class="neigh-list">
-        ${d.neighbors.map(n => `
-          <div class="neigh">
+        ${neighArr.map(n => {
+          const nl = Number(n.latency_ms);
+          const nc = isNaN(nl) ? 'var(--txt-mute)'
+            : nl < 15 ? 'var(--green)' : nl < 50 ? 'var(--txt)'
+            : nl < 150 ? 'var(--orange)' : 'var(--red)';
+          return `<div class="neigh">
             <span class="hn">${esc(n.hostname || n.node_id || '—')}</span>
-            <span class="muted mono">${esc(n.ipv4 || '—')}</span>
-            <span class="lat" style="color:${n.latency_ms < 15 ? 'var(--green)' : 'var(--txt)'}">
-              ${n.latency_ms != null ? n.latency_ms + ' ms' : '—'}</span>
-          </div>`).join('')}
+            <span class="muted mono">${esc(n.ipv4 || '无虚拟 IP')}</span>
+            <span class="lat" style="color:${nc}">${isNaN(nl) ? '—' : nl + ' ms'}</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  } else {
+    // 整块消失会让用户以为功能没做，这里给明确说明
+    neighHtml = `<div class="d-sec">
+      <h4>该节点的直连邻居</h4>
+      <div class="d-grid">
+        <div class="d-field"><div class="v muted">该节点未上报直连邻居信息（可能刚连上，或核心版本不支持 peer-center）</div></div>
       </div>
     </div>`;
   }
@@ -2976,12 +3067,28 @@ function renderDetail(d) {
   let routeHtml = '';
   if (d.route) {
     const r = d.route;
+    // next_hop 的取值是核心内部标记：
+    //   Local  → 本机自己
+    //   DIRECT → 直连，没有中间跳
+    // 直接展示英文标记会让人看不懂，转成中文说明并加颜色区分。
+    let hopTxt = '—', hopCls = 'muted';
+    const rawHop = String(r.next_hop_hostname || '');
+    if (!rawHop || rawHop === 'DIRECT') {
+      hopTxt = '直连（无中间跳）';
+      hopCls = 'hop-direct';
+    } else if (rawHop === 'Local') {
+      hopTxt = '本机自身';
+      hopCls = 'hop-self';
+    } else {
+      hopTxt = rawHop;
+      hopCls = 'hop-mid';
+    }
     routeHtml = `<div class="d-sec">
       <h4>路径</h4>
       <div class="d-grid">
         <div class="d-field"><div class="k">跳数</div><div class="v">${r.path_len != null ? r.path_len + ' 跳' : '—'}</div></div>
-        <div class="d-field"><div class="k">路径延迟</div><div class="v">${r.path_latency != null ? r.path_latency.toFixed(2) + ' ms' : '—'}</div></div>
-        <div class="d-field"><div class="k">下一跳</div><div class="v">${esc(r.next_hop_hostname || '—')}</div></div>
+        <div class="d-field"><div class="k">路径延迟</div><div class="v">${r.path_latency != null ? Number(r.path_latency).toFixed(2) + ' ms' : '—'}</div></div>
+        <div class="d-field"><div class="k">下一跳</div><div class="v ${hopCls}">${esc(hopTxt)}</div></div>
         <div class="d-field"><div class="k">可访问网段</div><div class="v mono">${esc(r.proxy_cidrs || '—')}</div></div>
       </div>
     </div>`;
@@ -3003,22 +3110,22 @@ function renderDetail(d) {
     </div>
 
     <div class="d-sec">
-      <h4>连接质量</h4>
+      <h4>连接质量${selfRef ? ' <span class="d-sub">本机不参与链路测量</span>' : ''}</h4>
       <div class="d-grid">
         <div class="d-field"><div class="k">当前延迟</div><div class="v" style="color:${latCol}">${latTxt}</div></div>
         <div class="d-field"><div class="k">丢包率</div><div class="v" style="color:${d.loss > 0 ? 'var(--red)' : 'var(--txt-mute)'}">${lossTxt}</div></div>
-        <div class="d-field"><div class="k">近 1 小时平均</div><div class="v">${d.avg1h != null ? d.avg1h.toFixed(2) + ' ms' : '—'}</div></div>
-        <div class="d-field"><div class="k">近 1 小时峰值</div><div class="v">${d.max1h != null ? d.max1h.toFixed(2) + ' ms' : '—'}</div></div>
+        <div class="d-field"><div class="k">近 1 小时平均</div><div class="v">${d.avg1h != null ? d.avg1h.toFixed(2) + ' ms' : (selfRef ? NA : '—')}</div></div>
+        <div class="d-field"><div class="k">近 1 小时峰值</div><div class="v">${d.max1h != null ? d.max1h.toFixed(2) + ' ms' : (selfRef ? NA : '—')}</div></div>
       </div>
     </div>
 
     <div class="d-sec">
-      <h4>流量</h4>
+      <h4>流量${selfRef ? ' <span class="d-sub">本机收发由各对等节点分别统计</span>' : ''}</h4>
       <div class="d-grid">
-        <div class="d-field"><div class="k">接收</div><div class="v mono">${esc(d.rx || '—')}</div></div>
-        <div class="d-field"><div class="k">发送</div><div class="v mono">${esc(d.tx || '—')}</div></div>
-        <div class="d-field"><div class="k">合计</div><div class="v mono">${fmtBytes(totalB)}</div></div>
-        <div class="d-field"><div class="k">收发比</div><div class="v">${rxB && txB ? '1 : ' + (txB / rxB).toFixed(1) : '—'}</div></div>
+        <div class="d-field"><div class="k">接收</div><div class="v mono">${d.rx && d.rx !== '-' ? esc(d.rx) : (selfRef ? NA : '—')}</div></div>
+        <div class="d-field"><div class="k">发送</div><div class="v mono">${d.tx && d.tx !== '-' ? esc(d.tx) : (selfRef ? NA : '—')}</div></div>
+        <div class="d-field"><div class="k">合计</div><div class="v mono">${totalB ? fmtBytes(totalB) : (selfRef ? NA : '—')}</div></div>
+        <div class="d-field"><div class="k">收发比</div><div class="v">${rxB && txB ? '1 : ' + (txB / rxB).toFixed(1) : (selfRef ? NA : '—')}</div></div>
       </div>
     </div>
 
@@ -3057,8 +3164,18 @@ function drawDetailMiniChart(d) {
   const svg = $('detailMiniSvg');
   if (!svg) return;
   const hist = latHistory.get(d.hostname || d.peer_id) || [];
+
+  // 本机没有链路延迟，画趋势没意义，直接说明原因
+  if (d.kind === 'local' || d.is_self_ref === true) {
+    svg.innerHTML = `<text x="350" y="30" text-anchor="middle" fill="var(--txt-mute)" font-size="10">本机不参与链路延迟测量</text>
+      <text x="350" y="46" text-anchor="middle" fill="var(--txt-mute)" font-size="9" opacity=".7">查看对等节点可看到延迟趋势</text>`;
+    return;
+  }
+
   if (hist.length < 2) {
-    svg.innerHTML = `<text x="350" y="36" text-anchor="middle" fill="var(--txt-mute)" font-size="10">采样中，稍候显示趋势</text>`;
+    const need = 2 - hist.length;
+    svg.innerHTML = `<text x="350" y="30" text-anchor="middle" fill="var(--txt-mute)" font-size="10">采样中，还需约 ${need * 2} 秒</text>
+      <text x="350" y="46" text-anchor="middle" fill="var(--txt-mute)" font-size="9" opacity=".7">面板每 2 秒采样一次，点击延迟列的曲线可看 1h / 6h / 24h 长趋势</text>`;
     return;
   }
   const W = 700, H = 64, P = 3;
@@ -3228,16 +3345,33 @@ function renderStatus(d) {
     }
   }
 
-  renderNode(d);
-  renderPeers(d);
-  renderProxy(d);
-  renderRoutes(d);
-  renderForwards(d);
-  renderActive(d);
+  /* 各模块独立渲染，互不影响
+   *
+   * 之前是顺序直接调用，任意一个模块抛异常（比如数据字段类型意外）
+   * 都会中断后面的全部渲染——曾经因为 renderRoutes 里对字符串调用
+   * .map() 抛 TypeError，导致末尾的 topoPeers 赋值被跳过，
+   * 表现为「拓扑图永远空白」，而且错误被 refresh 的 try/catch 吞掉，
+   * 极难定位。现在每个模块单独 try，一个坏不拖累其他。
+   */
+  const safeRender = (name, fn) => {
+    try { fn(); }
+    catch (e) {
+      console.error(`[render] ${name} 失败:`, e);
+    }
+  };
 
-  // 拓扑数据
-  topoPeers = d.peers || [];
-  renderTopo();
+  safeRender('node', () => renderNode(d));
+  safeRender('peers', () => renderPeers(d));
+  safeRender('proxy', () => renderProxy(d));
+  safeRender('routes', () => renderRoutes(d));
+  safeRender('forwards', () => renderForwards(d));
+  safeRender('active', () => renderActive(d));
+
+  // 拓扑数据（即使上面某个模块失败，这里也会执行）
+  safeRender('topo', () => {
+    topoPeers = Array.isArray(d.peers) ? d.peers : [];
+    renderTopo();
+  });
 }
 
 /* ---------------- 轮询 ---------------- */
@@ -3539,6 +3673,120 @@ function initSettingsUI() {
   });
 }
 
+/* ---------------- 异常明细弹窗 ----------------
+ *
+ * 表格只在行左侧画一条橙条 + 卡片头显示「N 个异常」，
+ * 但用户看不懂「为什么算异常」。这里把每条原因列出来，
+ * 并给出可点击的节点名直达详情。
+ * ---------------------------------------------- */
+
+/** 求某个节点的全部异常原因（返回空数组代表正常） */
+function abnormalReasons(p, myVer) {
+  const out = [];
+  if (p.kind === 'local') return out;
+
+  const loss = parseFloat(p.loss_rate);
+  const lat = parseFloat(p.lat_ms);
+
+  if (!isNaN(loss) && loss >= 5) {
+    out.push({
+      key: 'loss',
+      label: '丢包率偏高',
+      value: loss.toFixed(1) + '%',
+      limit: '≥ 5%',
+      color: loss >= 20 ? 'red' : 'orange',
+      desc: '链路不稳定，可能是无线信号弱、NAT 穿透质量差，或对端带宽被占满。'
+    });
+  }
+  if (!isNaN(lat) && lat >= 150) {
+    out.push({
+      key: 'lat',
+      label: '延迟过高',
+      value: lat.toFixed(2) + ' ms',
+      limit: '≥ 150ms',
+      color: lat >= 300 ? 'red' : 'orange',
+      desc: '可能走了远距离中转，或本机到对端的路由绕远。'
+    });
+  }
+  if (myVer && p.version && p.version !== myVer) {
+    out.push({
+      key: 'ver',
+      label: '版本与本机不一致',
+      value: String(p.version).split('-')[0],
+      limit: '本机 ' + String(myVer).split('-')[0],
+      color: 'orange',
+      desc: '跨大版本组网可能出现协议不兼容，建议升级到同一版本。'
+    });
+  }
+  return out;
+}
+
+function openAbnormalList() {
+  const m = $('abnModal');
+  const body = $('abnBody');
+  if (!m || !body) return;
+
+  const peers = (lastStatus && lastStatus.peers) || [];
+  const myVer = (peers.find(p => p.kind === 'local') || {}).version || '';
+
+  const bad = peers
+    .map(p => ({ p, reasons: abnormalReasons(p, myVer) }))
+    .filter(x => x.reasons.length > 0);
+
+  if (!bad.length) {
+    body.innerHTML = `<div class="abn-empty">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+        stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5L16 9.5"/></svg>
+      <div class="t">当前没有异常节点</div>
+      <div class="d">所有节点的丢包、延迟、版本都在正常范围内。</div>
+    </div>`;
+    m.classList.add('open');
+    return;
+  }
+
+  body.innerHTML = bad.map(({ p, reasons }) => {
+    const loss = parseFloat(p.loss_rate);
+    const lat = parseFloat(p.lat_ms);
+    return `<div class="abn-card">
+      <div class="abn-head">
+        <span class="abn-name">${esc(p.hostname || '—')}</span>
+        <span class="abn-ip mono">${esc(p.ipv4 || '无虚拟 IP')}</span>
+        <span class="abn-kind">${p.kind === 'p2p' ? '直连' : '中转'}</span>
+        <button class="sm-btn abn-goto" data-goto-pid="${esc(String(p.id == null ? '' : p.id))}"
+          data-goto-host="${esc(p.hostname || '')}">查看详情 →</button>
+      </div>
+      <div class="abn-reasons">
+        ${reasons.map(r => `<div class="abn-reason">
+          <span class="abn-dot ${r.color}"></span>
+          <span class="abn-rl">${esc(r.label)}</span>
+          <span class="abn-rv ${r.color}">${esc(r.value)}</span>
+          <span class="abn-lim">阈值 ${esc(r.limit)}</span>
+          <span class="abn-rd">${esc(r.desc)}</span>
+        </div>`).join('')}
+      </div>
+    </div>`;
+  }).join('');
+
+  // 「查看详情」直接跳到节点详情，形成闭环
+  body.querySelectorAll('.abn-goto').forEach(b => {
+    b.addEventListener('click', () => {
+      m.classList.remove('open');
+      openNodeDetail(b.dataset.gotoPid || b.dataset.gotoHost);
+    });
+  });
+
+  m.classList.add('open');
+}
+
+function initAbnormalTag() {
+  const tag = $('abnormalTag');
+  if (!tag) return;
+  tag.addEventListener('click', () => {
+    if (tag.style.display === 'none') return;
+    openAbnormalList();
+  });
+}
+
 /* ---------------- 模态框通用关闭 ---------------- */
 
 function initModalClose() {
@@ -3611,6 +3859,7 @@ async function init() {
   // 拓扑
   initTopoControls();
   initModalClose();
+  initAbnormalTag();
   initChartUI();
   initDetailUI();
   initLogUI();
@@ -3676,17 +3925,19 @@ async function init() {
   // 延迟检查孤儿（不阻塞首屏）
   setTimeout(refreshOrphanBar, 1200);
 
-  // 启动时自动连核心
+  // 启动时自动连接核心
+  //
+  // 这个动作已经移到后端 setup 里执行（Rust 侧读取 autostart_core）。
+  // 移走的原因：
+  //   1) 原先这里用 setTimeout(800ms) 再检查 lastStatus，
+  //      首屏状态没回来时这次启动就被丢掉了；
+  //   2) start_minimized 生效后窗口可能在托盘，WebView 被节流，
+  //      定时器更不可靠；
+  //   3) 前后端都做会导致重复启动（虽然 start_core 有幂等判断，
+  //      但会多一次无谓的进程扫描）。
+  // 这里只在前端做一次「状态兜底刷新」，让界面尽快反映核心已在运行。
   if (APP_SETTINGS.autostart_core) {
-    setTimeout(() => {
-      if (lastStatus && !lastStatus.running) {
-        action('/api/start', '启动', {
-          btnId: 'btnStart',
-          busyTitle: '正在启动核心…',
-          busyDesc: '启动时自动连接已开启',
-        });
-      }
-    }, 800);
+    setTimeout(() => { if (!lastStatus || !lastStatus.running) refresh(); }, 3500);
   }
 }
 

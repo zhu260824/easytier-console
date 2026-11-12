@@ -1190,14 +1190,34 @@ fn peer_detail(id: String) -> Result<Value, String> {
         .unwrap_or(Value::Null);
 
     // 3) 邻居拓扑：peer-center
+    //    优先按 node_id 匹配（唯一），hostname 兜底。
+    //    只用 hostname 会在两台同名机器时匹配到错误的节点。
+    let my_id = p
+        .get("id")
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .unwrap_or_default();
+    let my_host = p.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
     let centers = cli_json(&["peer-center"]).unwrap_or(Value::Array(vec![]));
     let neighbors: Vec<Value> = centers
         .as_array()
         .map(|cs| {
             cs.iter()
                 .filter(|c| {
-                    c.get("hostname").and_then(|v| v.as_str())
-                        == p.get("hostname").and_then(|v| v.as_str())
+                    let cid = c
+                        .get("node_id")
+                        .map(|v| match v {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .unwrap_or_default();
+                    if !my_id.is_empty() && !cid.is_empty() {
+                        cid == my_id
+                    } else {
+                        c.get("hostname").and_then(|v| v.as_str()).unwrap_or("") == my_host
+                    }
                 })
                 .flat_map(|c| {
                     c.get("direct_peers")
@@ -1213,6 +1233,28 @@ fn peer_detail(id: String) -> Result<Value, String> {
     let host = p.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
     let (mn, avg, mx) = history::stats(host, 60).unwrap_or((None, None, None));
 
+    // 5) 版本一致性：必须由后端算好返回
+    //   前端原来靠 d.version_match 判断，但后端从没返回这个字段，
+    //   导致 undefined 恒为假 → 所有节点都被标成「版本不一致」。
+    //   基准取本机（cost == Local）的版本。
+    let my_ver = arr
+        .iter()
+        .find(|x| x.get("cost").and_then(|v| v.as_str()) == Some("Local"))
+        .and_then(|x| x.get("version").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let this_ver = p.get("version").and_then(|v| v.as_str()).unwrap_or("");
+    let is_local = p.get("cost").and_then(|v| v.as_str()) == Some("Local");
+    // 本机恒视为一致；其余节点与基准逐字节比较（含 commit 后缀）
+    let version_match = is_local
+        || my_ver.is_empty()
+        || this_ver.is_empty()
+        || this_ver == my_ver;
+
+    // 6) 本机的 lat/loss/rx/tx 由核心自己填 "-"（自己到自己没有链路），
+    //    这不是采集失败。标记出来让前端区分「无意义」和「没采到」。
+    let is_self_ref = is_local;
+
     Ok(serde_json::json!({
         "hostname": p.get("hostname").cloned().unwrap_or(Value::Null),
         "ipv4": p.get("ipv4").cloned().unwrap_or(Value::Null),
@@ -1227,6 +1269,9 @@ fn peer_detail(id: String) -> Result<Value, String> {
         "tunnel_proto": p.get("tunnel_proto").cloned().unwrap_or(Value::Null),
         "nat_label": p.get("nat_type").cloned().unwrap_or(Value::Null),
         "version": p.get("version").cloned().unwrap_or(Value::Null),
+        "version_match": version_match,
+        "my_version": if my_ver.is_empty() { Value::Null } else { Value::String(my_ver) },
+        "is_self_ref": is_self_ref,
         "lat": p.get("lat_ms").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()),
         "loss": p.get("loss_rate").and_then(|v| v.as_str())
             .map(|s| s.trim_end_matches('%')).and_then(|s| s.parse::<f64>().ok()),
@@ -1601,53 +1646,63 @@ fn run_selftest() -> i32 {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(2).map(|s| s.as_str()).unwrap_or("all");
 
-    println!("=== EasyTier 面板自检 ===");
-    println!("根目录   : {}", root_dir().display());
-    println!("配置目录 : {}", config_dir().display());
-    println!("日志目录 : {}", logs_dir().display());
-    println!("资源目录 : {}", resource_dir().display());
-    println!();
-
+    /* 基础自检只在不带子命令、或显式指定基础项时执行
+     *
+     * 之前的 cmd 默认值是 "all"，而 all 会命中 `"config" | "all"` 分支，
+     * 于是 `--selftest full` 会先打一遍完整基础自检，再打全量自检，
+     * 输出冗余。这里加了 skip_base，让 full / settings / orphan 等
+     * 专项命令只跑自己那部分。
+     */
+    let skip_base = !matches!(cmd, "all" | "");
     let mut fail = 0;
 
-    // 目录结构
-    println!("--- 目录结构 ---");
-    for (name, p) in [
-        ("config", config_dir()),
-        ("logs", logs_dir()),
-        ("resource", resource_dir()),
-    ] {
-        if p.is_dir() {
-            println!("  [OK] {name}/ -> {}", p.display());
-        } else {
-            println!("  [FAIL] {name}/ 不存在");
-            fail += 1;
-        }
-    }
-    println!();
+    if !skip_base {
+        println!("=== EasyTier 面板自检 ===");
+        println!("根目录   : {}", root_dir().display());
+        println!("配置目录 : {}", config_dir().display());
+        println!("日志目录 : {}", logs_dir().display());
+        println!("资源目录 : {}", resource_dir().display());
+        println!();
 
-    // 关键文件
-    println!("--- 关键文件 ---");
-    let checks = [
-        ("config.toml", config_file()),
-        ("easytier-core", core_exe()),
-        ("easytier-cli", cli_exe()),
-    ];
-    for (name, p) in checks {
-        if p.is_file() {
-            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-            println!("  [OK] {name}  {} ({:.1} MB)", p.display(), size as f64 / 1048576.0);
-        } else {
-            println!("  [MISS] {name}  未找到: {}", p.display());
+        // 目录结构
+        println!("--- 目录结构 ---");
+        for (name, p) in [
+            ("config", config_dir()),
+            ("logs", logs_dir()),
+            ("resource", resource_dir()),
+        ] {
+            if p.is_dir() {
+                println!("  [OK] {name}/ -> {}", p.display());
+            } else {
+                println!("  [FAIL] {name}/ 不存在");
+                fail += 1;
+            }
         }
-    }
-    println!();
+        println!();
 
-    // core 运行状态
-    println!("--- 核心状态 ---");
-    let running = core_running();
-    println!("  core_running() = {running}");
-    println!();
+        // 关键文件
+        println!("--- 关键文件 ---");
+        let checks = [
+            ("config.toml", config_file()),
+            ("easytier-core", core_exe()),
+            ("easytier-cli", cli_exe()),
+        ];
+        for (name, p) in checks {
+            if p.is_file() {
+                let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                println!("  [OK] {name}  {} ({:.1} MB)", p.display(), size as f64 / 1048576.0);
+            } else {
+                println!("  [MISS] {name}  未找到: {}", p.display());
+            }
+        }
+        println!();
+
+        // core 运行状态
+        println!("--- 核心状态 ---");
+        let running = core_running();
+        println!("  core_running() = {running}");
+        println!();
+    }
 
     match cmd {
         "status" | "all" => {
@@ -1739,6 +1794,133 @@ fn run_selftest() -> i32 {
                 }
             }
             println!();
+        }
+        /* 全量自检：一次验证所有关键能力
+         *
+         * 用途：发布前自查 / 排查「某功能没反应」时快速定位是
+         * 环境问题还是代码问题。每项独立判定，互不影响。
+         */
+        "full" => {
+            println!("=== 全量功能自检 ===\n");
+
+            // ---------- 1. 路径与文件 ----------
+            println!("[1] 路径与文件");
+            println!("  程序目录 : {}", root_dir().display());
+            println!("  资源目录 : {}", resource_dir().display());
+            let core = core_exe();
+            if core.exists() {
+                println!("  ✅ easytier-core.exe 存在");
+            } else {
+                println!("  ❌ easytier-core.exe 缺失: {}", core.display());
+                fail += 1;
+            }
+            let cli = resource_dir().join("easytier-cli.exe");
+            if cli.exists() {
+                println!("  ✅ easytier-cli.exe 存在");
+            } else {
+                println!("  ❌ easytier-cli.exe 缺失");
+                fail += 1;
+            }
+            let cfg = config_file();
+            if cfg.exists() {
+                println!("  ✅ config.toml 存在 ({} 字节)", std::fs::metadata(&cfg).map(|m| m.len()).unwrap_or(0));
+            } else {
+                println!("  ⚠️  config.toml 不存在（首次运行需创建）");
+            }
+            println!();
+
+            // ---------- 2. 权限 ----------
+            println!("[2] 运行权限");
+            if is_elevated() {
+                println!("  ✅ 管理员权限（可创建虚拟网卡）");
+            } else {
+                println!("  ⚠️  非管理员权限：启动核心会失败");
+            }
+            println!();
+
+            // ---------- 3. 设置项读取 ----------
+            println!("[3] 设置项（settings.json）");
+            let s = settings::load_settings();
+            println!("  stop_core_on_exit = {}", s.stop_core_on_exit);
+            println!("  confirm_on_exit   = {}", s.confirm_on_exit);
+            println!("  cleanup_orphan    = {}", s.cleanup_orphan);
+            println!("  minimize_to_tray  = {}", s.minimize_to_tray);
+            println!("  autostart         = {}", s.autostart);
+            println!("  autostart_core    = {}", s.autostart_core);
+            println!("  start_minimized   = {}", s.start_minimized);
+            // 重点校验：这两项以前存了但不生效
+            println!("  → 窗口启动策略: {}", if s.start_minimized { "最小化到托盘" } else { "显示窗口" });
+            println!("  → 自动连接核心: {}", if s.autostart_core { "开启（后端 setup 执行）" } else { "关闭" });
+            println!();
+
+            // ---------- 4. 开机自启 ----------
+            println!("[4] 开机自启");
+            if autostart_enabled() {
+                println!("  ✅ 已启用，快捷方式已就位");
+            } else {
+                println!("  ⚠️  未启用");
+            }
+            println!();
+
+            // ---------- 5. 核心运行状态 ----------
+            println!("[5] 核心运行状态");
+            let running = core_running();
+            println!("  easytier-core 运行中: {}", if running { "✅ 是" } else { "否" });
+            if running {
+                println!("  虚拟网卡就绪: {}", if tun_adapter_ready() { "✅" } else { "❌" });
+                match cli_json(&["peer"]) {
+                    Ok(v) => {
+                        let n = v.as_array().map(|a| a.len()).unwrap_or(0);
+                        println!("  ✅ CLI 可查询，对等节点 {} 个", n);
+                    }
+                    Err(e) => {
+                        println!("  ❌ CLI 查询失败: {}", e);
+                        fail += 1;
+                    }
+                }
+            } else {
+                println!("  （核心未运行，跳过 CLI 测试）");
+            }
+            println!();
+
+            // ---------- 6. 历史数据库 ----------
+            println!("[6] 延迟历史（SQLite）");
+            let db = history::db_path();
+            if db.exists() {
+                let sz = std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0);
+                println!("  ✅ history.db 存在 ({} 字节)", sz);
+                if let Ok(n) = history::sample_count() {
+                    println!("  已采样记录: {} 条", n);
+                }
+            } else {
+                println!("  ⚠️  history.db 尚未创建（首次采样后生成）");
+            }
+            println!();
+
+            // ---------- 7. 日志 ----------
+            println!("[7] 日志");
+            let core_log = log_file();
+            println!("  核心日志: {} ({})", core_log.display(),
+                if core_log.exists() { "存在".to_string() } else { "不存在".to_string() });
+            let app_log_p = app_log_file();
+            println!("  程序日志: {} ({})", app_log_p.display(),
+                if app_log_p.exists() { "存在".to_string() } else { "不存在".to_string() });
+            println!();
+
+            // ---------- 8. 孤儿进程 ----------
+            println!("[8] 孤儿进程");
+            #[cfg(target_os = "windows")]
+            {
+                let cores = settings::list_cores();
+                let orphans = settings::find_orphans();
+                println!("  核心进程 {} 个，其中孤儿 {} 个", cores.len(), orphans.len());
+                if !orphans.is_empty() {
+                    println!("  ⚠️  存在孤儿（启动时已按设置清理，或点「立即清理」）");
+                }
+            }
+            println!();
+
+            println!("=== 全量自检结束，失败项: {} ===", fail);
         }
         "orphan" => {
             println!("--- 孤儿核心检测 ---");
@@ -1925,7 +2107,21 @@ fn main() {
 
     tauri::Builder::default()
         .setup(|app| {
-            setup_tray(app)?;
+            /* 托盘创建失败不能连累窗口
+             *
+             * 原来这里是 setup_tray(app)?，托盘建失败直接让 setup 返回 Err，
+             * 窗口永远不显示 → 用户完全没法操作。
+             * 更糟的是配合 start_minimized（窗口本就隐藏），
+             * 会变成「双击图标什么都没发生」。
+             *
+             * 现在改成容错：托盘失败只记日志并强制显示窗口。
+             */
+            let mut tray_ok = true;
+            if let Err(e) = setup_tray(app) {
+                tray_ok = false;
+                eprintln!("[startup] 托盘创建失败: {e}");
+                app_log(&format!("托盘创建失败: {e}"));
+            }
 
             /* 启动时清理孤儿核心
              *
@@ -1946,9 +2142,61 @@ fn main() {
                 });
             }
 
+            /* 启动时的窗口可见性
+             *
+             * 窗口在 tauri.conf.json 里是 visible:false 创建的，
+             * 这样能避免「先闪一下再最小化」的观感问题。
+             *
+             * start_minimized = true  → 保持在托盘，不显示窗口
+             * start_minimized = false → 立刻显示并前置
+             *
+             * 关键兜底：如果托盘不可用（tray_ok == false），
+             * 无论设置如何都必须显示窗口，否则用户没有任何入口。
+             */
+            let force_show = !tray_ok || !s.start_minimized;
+            if force_show {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+                if !tray_ok {
+                    app_log("窗口已显示（托盘不可用，忽略 start_minimized）");
+                } else {
+                    app_log("窗口已显示（start_minimized=false）");
+                }
+            } else {
+                app_log("启动时最小化到托盘（start_minimized=true）");
+            }
+
+            /* 启动时自动连接核心
+             *
+             * 放在后端而不是前端定时器里，原因：
+             *   前端那份是 setTimeout(800ms) 后检查 lastStatus，
+             *   如果首屏状态还没回来就会丢掉这次启动；
+             *   而且窗口最小化到托盘时 WebView 可能被节流，
+             *   定时器更不可靠。
+             *
+             * 这里用一个短延迟，等 wintun 等依赖就绪后再拉起 core。
+             */
+            if s.autostart_core {
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(1200));
+                    // 已有核心在跑就不要重复启动
+                    if core_running() {
+                        app_log("启动自动连接：核心已在运行，跳过");
+                        return;
+                    }
+                    match start_core() {
+                        Ok(msg) => app_log(&format!("启动自动连接成功: {msg}")),
+                        Err(e) => app_log(&format!("启动自动连接失败: {e}")),
+                    }
+                });
+            }
+
             // 延迟历史采样（每 5 秒一次，独立线程）
             history::start_sampler();
-            app_log("面板启动 version=1.1.1");
+            // 版本号取编译期注入的 CARGO_PKG_VERSION，避免升级后忘记改这里
+            app_log(&format!("面板启动 version={}", env!("CARGO_PKG_VERSION")));
 
             Ok(())
         })
